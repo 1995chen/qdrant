@@ -13,6 +13,7 @@ workspace = true
 
 [features]
 tracing = ["dep:tracing", "api/tracing", "collection/tracing", "segment/tracing"]
+staging = ["collection/staging"]
 
 [dev-dependencies]
 proptest = { workspace = true }
@@ -25,6 +26,7 @@ thiserror = { workspace = true }
 rand = { workspace = true }
 wal = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }

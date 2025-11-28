@@ -12,6 +12,7 @@ mod shard_transfer;
 mod sharding_keys;
 mod snapshots;
 mod state_management;
+mod telemetry;
 
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -22,7 +23,6 @@ use std::time::Duration;
 use clean::ShardCleanTasks;
 use common::budget::ResourceBudget;
 use common::save_on_disk::SaveOnDisk;
-use common::types::{DetailsLevel, TelemetryDetail};
 use io::storage_version::StorageVersion;
 use segment::types::ShardKey;
 use semver::Version;
@@ -54,9 +54,7 @@ use crate::shards::transfer::helpers::check_transfer_conflicts_strict;
 use crate::shards::transfer::transfer_tasks_pool::{TaskResult, TransferTasksPool};
 use crate::shards::transfer::{ShardTransfer, ShardTransferMethod};
 use crate::shards::{CollectionId, replica_set};
-use crate::telemetry::{
-    CollectionConfigTelemetry, CollectionTelemetry, CollectionsAggregatedTelemetry,
-};
+use crate::telemetry::CollectionsAggregatedTelemetry;
 
 /// Collection's data is split into several shards.
 pub struct Collection {
@@ -120,7 +118,8 @@ impl Collection {
     ) -> CollectionResult<Self> {
         let start_time = std::time::Instant::now();
 
-        let mut shard_holder = ShardHolder::new(path)?;
+        let sharding_method = collection_config.params.sharding_method.unwrap_or_default();
+        let mut shard_holder = ShardHolder::new(path, sharding_method)?;
         shard_holder.set_shard_key_mappings(shard_key_mapping.clone().unwrap_or_default())?;
 
         let payload_index_schema = Arc::new(Self::load_payload_index_schema(path)?);
@@ -248,7 +247,9 @@ impl Collection {
         });
         collection_config.validate_and_warn();
 
-        let mut shard_holder = ShardHolder::new(path).expect("Can not create shard holder");
+        let sharding_method = collection_config.params.sharding_method.unwrap_or_default();
+        let mut shard_holder =
+            ShardHolder::new(path, sharding_method).expect("Can not create shard holder");
 
         let mut effective_optimizers_config = collection_config.optimizer_config.clone();
 
@@ -336,8 +337,8 @@ impl Collection {
         true
     }
 
-    pub fn name(&self) -> String {
-        self.id.clone()
+    pub fn name(&self) -> &str {
+        &self.id
     }
 
     pub async fn uuid(&self) -> Option<uuid::Uuid> {
@@ -623,7 +624,11 @@ impl Collection {
                         "Transfer {:?} does not exist, but not reported as cancelled. Reporting now.",
                         transfer.key(),
                     );
-                    on_transfer_failure(transfer, self.name(), "transfer task does not exist");
+                    on_transfer_failure(
+                        transfer,
+                        self.name().to_string(),
+                        "transfer task does not exist",
+                    );
                 }
                 Some(TaskResult::Running) => (),
                 Some(TaskResult::Finished) => {
@@ -631,14 +636,14 @@ impl Collection {
                         "Transfer {:?} is finished successfully, but not reported. Reporting now.",
                         transfer.key(),
                     );
-                    on_transfer_success(transfer, self.name());
+                    on_transfer_success(transfer, self.name().to_string());
                 }
                 Some(TaskResult::Failed) => {
                     log::debug!(
                         "Transfer {:?} is failed, but not reported as failed. Reporting now.",
                         transfer.key(),
                     );
-                    on_transfer_failure(transfer, self.name(), "transfer failed");
+                    on_transfer_failure(transfer, self.name().to_string(), "transfer failed");
                 }
             }
         }
@@ -778,52 +783,24 @@ impl Collection {
         Ok(())
     }
 
-    pub async fn get_telemetry_data(&self, detail: TelemetryDetail) -> CollectionTelemetry {
-        let (shards_telemetry, transfers, resharding) = {
-            if detail.level >= DetailsLevel::Level3 {
-                let shards_holder = self.shards_holder.read().await;
-                let mut shards_telemetry = Vec::new();
-                for shard in shards_holder.all_shards() {
-                    shards_telemetry.push(shard.get_telemetry_data(detail).await)
-                }
-                (
-                    Some(shards_telemetry),
-                    Some(shards_holder.get_shard_transfer_info(&*self.transfer_tasks.lock().await)),
-                    Some(
-                        shards_holder
-                            .get_resharding_operations_info()
-                            .unwrap_or_default(),
-                    ),
-                )
-            } else {
-                (None, None, None)
-            }
-        };
-
-        let shard_clean_tasks = self.clean_local_shards_statuses();
-
-        CollectionTelemetry {
-            id: self.name(),
-            init_time_ms: self.init_time.as_millis() as u64,
-            config: CollectionConfigTelemetry::from(self.collection_config.read().await.clone()),
-            shards: shards_telemetry,
-            transfers,
-            resharding,
-            shard_clean_tasks: (!shard_clean_tasks.is_empty()).then_some(shard_clean_tasks),
-        }
-    }
-
-    pub async fn get_aggregated_telemetry_data(&self) -> CollectionsAggregatedTelemetry {
+    pub async fn get_aggregated_telemetry_data(
+        &self,
+        timeout: Duration,
+    ) -> CollectionResult<CollectionsAggregatedTelemetry> {
+        let start = std::time::Instant::now();
         let shards_holder = self.shards_holder.read().await;
 
         let mut shard_optimization_statuses = Vec::new();
         let mut vectors = 0;
 
         for shard in shards_holder.all_shards() {
-            let shard_optimization_status = shard
-                .get_optimization_status()
+            let shard_optimization_status = match shard
+                .get_optimization_status(timeout.saturating_sub(start.elapsed()))
                 .await
-                .unwrap_or(OptimizersStatus::Ok);
+            {
+                None => OptimizersStatus::Ok,
+                Some(status) => status?,
+            };
 
             shard_optimization_statuses.push(shard_optimization_status);
 
@@ -835,11 +812,11 @@ impl Collection {
             .max()
             .unwrap_or(OptimizersStatus::Ok);
 
-        CollectionsAggregatedTelemetry {
+        Ok(CollectionsAggregatedTelemetry {
             vectors,
             optimizers_status,
             params: self.collection_config.read().await.params.clone(),
-        }
+        })
     }
 
     pub async fn effective_optimizers_config(&self) -> CollectionResult<OptimizersConfig> {

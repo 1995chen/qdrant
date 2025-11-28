@@ -607,7 +607,7 @@ impl SegmentHolder {
             interval = interval.saturating_mul(2);
             if interval.as_secs() >= 10 {
                 log::warn!(
-                    "Trying to read-lock all collection segments is taking a long time. This could be a deadlock and may block new updates.",
+                    "Trying to read-lock a segment is taking a long time. This could be a deadlock and may block new updates.",
                 );
             }
         }
@@ -775,7 +775,7 @@ impl SegmentHolder {
             let points = ids
                 .iter()
                 .cloned()
-                .check_stop(|| is_stopped.load(Ordering::Relaxed))
+                .stop_if(is_stopped)
                 .filter(|id| read_segment.has_point(*id));
             for point in points {
                 let is_ok = f(point, &read_segment)?;

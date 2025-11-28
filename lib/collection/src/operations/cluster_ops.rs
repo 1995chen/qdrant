@@ -47,6 +47,10 @@ pub enum ClusterOperations {
     AbortResharding(AbortReshardingOperation),
     /// Trigger replication of points between two shards
     ReplicatePoints(ReplicatePointsOperation),
+
+    /// Introduce artificial delay to a node
+    #[cfg(feature = "staging")]
+    TestSlowDown(TestSlowDownOperation),
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Validate, Clone)]
@@ -64,6 +68,7 @@ pub struct DropShardingKeyOperation {
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Validate, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct RestartTransferOperation {
+    #[validate(nested)]
     pub restart_transfer: RestartTransfer,
 }
 
@@ -84,8 +89,7 @@ pub struct CreateShardingKey {
     pub placement: Option<Vec<PeerId>>,
     /// Initial state of the shards for this key
     /// If not specified, will be `Initializing` first and then `Active`
-
-    #[schemars(skip)] // unstable feature, hide for internal use
+    /// Warning: do not change this unless you know what you are doing
     pub initial_state: Option<ReplicaState>,
 }
 
@@ -95,7 +99,7 @@ pub struct DropShardingKey {
     pub shard_key: ShardKey,
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema, Validate, Clone)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct RestartTransfer {
     pub shard_id: ShardId,
@@ -124,6 +128,8 @@ impl Validate for ClusterOperations {
             ClusterOperations::FinishResharding(op) => op.validate(),
             ClusterOperations::AbortResharding(op) => op.validate(),
             ClusterOperations::ReplicatePoints(op) => op.validate(),
+            #[cfg(feature = "staging")]
+            ClusterOperations::TestSlowDown(op) => op.validate(),
         }
     }
 }
@@ -261,6 +267,17 @@ pub struct MoveShard {
     pub method: Option<ShardTransferMethod>,
 }
 
+impl Validate for RestartTransfer {
+    fn validate(&self) -> Result<(), ValidationErrors> {
+        validate_shard_different_peers(
+            self.from_peer_id,
+            self.to_peer_id,
+            self.shard_id,
+            self.to_shard_id,
+        )
+    }
+}
+
 impl Validate for MoveShard {
     fn validate(&self) -> Result<(), ValidationErrors> {
         validate_shard_different_peers(
@@ -311,13 +328,17 @@ pub struct StartResharding {
 }
 
 /// Resharding direction, scale up or down in number of shards
+///
+/// - `up` - Scale up, add a new shard
+///
+/// - `down` - Scale down, remove a shard
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReshardingDirection {
-    /// Scale up, add a new shard
+    // Scale up, add a new shard
     #[default]
     Up,
-    /// Scale down, remove a shard
+    // Scale down, remove a shard
     Down,
 }
 
@@ -338,3 +359,6 @@ pub struct FinishResharding {}
 
 #[derive(Copy, Clone, Debug, Deserialize, Serialize, JsonSchema, Validate)]
 pub struct AbortResharding {}
+
+#[cfg(feature = "staging")]
+pub use super::staging::{TestSlowDown, TestSlowDownOperation};

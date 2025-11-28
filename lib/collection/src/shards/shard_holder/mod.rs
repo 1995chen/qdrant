@@ -62,10 +62,15 @@ pub struct ShardHolder {
     pub(crate) shard_transfers: SaveOnDisk<HashSet<ShardTransfer>>,
     pub(crate) shard_transfer_changes: broadcast::Sender<ShardTransferChange>,
     pub(crate) resharding_state: SaveOnDisk<Option<ReshardState>>,
+    /// Hash rings per shard key
+    ///
+    /// In case of auto sharding, this only hash a `None` hash ring. In case of custom sharding,
+    /// this only has hash rings for defined shard keys excluding `None`.
     pub(crate) rings: HashMap<Option<ShardKey>, HashRingRouter>,
     key_mapping: SaveOnDisk<ShardKeyMapping>,
     // Duplicates the information from `key_mapping` for faster access, does not use locking
     shard_id_to_key_mapping: AHashMap<ShardId, ShardKey>,
+    sharding_method: ShardingMethod,
 }
 
 pub type LockedShardHolder = RwLock<ShardHolder>;
@@ -77,7 +82,7 @@ impl ShardHolder {
         }
     }
 
-    pub fn new(collection_path: &Path) -> CollectionResult<Self> {
+    pub fn new(collection_path: &Path, sharding_method: ShardingMethod) -> CollectionResult<Self> {
         let shard_transfers =
             SaveOnDisk::load_or_init_default(collection_path.join(SHARD_TRANSFERS_FILE))?;
         let resharding_state: SaveOnDisk<Option<ReshardState>> =
@@ -85,6 +90,9 @@ impl ShardHolder {
 
         let key_mapping: SaveOnDisk<ShardKeyMapping> =
             SaveOnDisk::load_or_init_default(collection_path.join(SHARD_KEY_MAPPING_FILE))?;
+
+        // TODO(1.17.0): Remove once the old shardkey format has been removed entirely.
+        Self::migrate_shard_key_if_needed(&key_mapping)?;
 
         let mut shard_id_to_key_mapping = AHashMap::new();
 
@@ -94,7 +102,10 @@ impl ShardHolder {
             }
         }
 
-        let rings = HashMap::from([(None, HashRingRouter::single())]);
+        let rings = match sharding_method {
+            ShardingMethod::Auto => HashMap::from([(None, HashRingRouter::single())]),
+            ShardingMethod::Custom => HashMap::new(),
+        };
 
         let (shard_transfer_changes, _) = broadcast::channel(64);
 
@@ -106,6 +117,7 @@ impl ShardHolder {
             rings,
             key_mapping,
             shard_id_to_key_mapping,
+            sharding_method,
         })
     }
 
@@ -246,10 +258,25 @@ impl ShardHolder {
     }
 
     fn rebuild_rings(&mut self) {
-        let mut rings = HashMap::from([(None, HashRingRouter::single())]);
+        let mut rings = match self.sharding_method {
+            // With auto sharding, we have a single hash ring
+            ShardingMethod::Auto => HashMap::from([(None, HashRingRouter::single())]),
+            // With custom sharding, we have a hash ring per shard key
+            ShardingMethod::Custom => HashMap::new(),
+        };
+
+        // Add shards and shard keys
         let ids_to_key = self.get_shard_id_to_key_mapping();
         for shard_id in self.shards.keys() {
             let shard_key = ids_to_key.get(shard_id).cloned();
+            debug_assert!(
+                matches!(
+                    (self.sharding_method, &shard_key),
+                    (ShardingMethod::Auto, None) | (ShardingMethod::Custom, Some(_)),
+                ),
+                "auto sharding cannot have shard key, custom sharding must have shard key ({:?}, {shard_key:?})",
+                self.sharding_method,
+            );
             rings
                 .entry(shard_key)
                 .or_insert_with(HashRingRouter::single)
@@ -572,6 +599,8 @@ impl ShardHolder {
                 let (shard_ids_to_query, used_shard_key) =
                     self.route_with_fallback_for_read(key)?;
 
+                log::trace!("Search routing with fallback: {used_shard_key:?}");
+
                 for shard_id in shard_ids_to_query {
                     if let Some(replica_set) = self.shards.get(&shard_id) {
                         res.push((replica_set, Some(used_shard_key)));
@@ -625,16 +654,16 @@ impl ShardHolder {
         let fallback_shard_ids = shard_key_to_ids_mapping.remove(&key.fallback);
 
         if let Some(target_shard_ids) = target_shard_ids {
-            let replicas = target_shard_ids
+            let target_replicas = target_shard_ids
                 .iter()
                 .filter_map(|shard_id| self.shards.get(shard_id))
                 .collect::<Vec<_>>();
 
-            let target_shards_active = replicas
+            let target_shards_active = target_replicas
                 .iter()
-                .all(|replica_set| !replica_set.active_shards(false).is_empty());
+                .all(|replica_set| !replica_set.readable_shards().is_empty());
 
-            if !replicas.is_empty() && target_shards_active {
+            if !target_replicas.is_empty() && target_shards_active {
                 // 1st condition is required to handle empty shard keys (2nd one returns true)
                 Ok((target_shard_ids, &key.target))
             } else if let Some(fallback_shard_ids) = fallback_shard_ids {
@@ -671,16 +700,17 @@ impl ShardHolder {
         let fallback_shard_ids = shard_key_to_ids_mapping.remove(&fallback);
 
         if let Some(target_shard_ids) = target_shard_ids {
-            let replicas = target_shard_ids
+            let target_replicas = target_shard_ids
                 .iter()
                 .filter_map(|shard_id| self.shards.get(shard_id))
                 .collect::<Vec<_>>();
 
-            let target_shards_active = replicas
+            // Check that at least one active replica per shard exists
+            let target_shards_active = target_replicas
                 .iter()
                 .all(|replica_set| !replica_set.active_shards(false).is_empty());
 
-            if replicas.is_empty() {
+            if target_replicas.is_empty() {
                 return if let Some(fallback_shard_ids) = fallback_shard_ids {
                     Ok(vec![(fallback_shard_ids, fallback)])
                 } else {
@@ -699,8 +729,12 @@ impl ShardHolder {
                 // Target:
                 // Shard_id 1 -> replicas: A (Partial)
                 // Shard_id 2 -> replicas: B (Active)
-                // In this case we want to propagate update to all shards and replicas
-                // Means the process of initialization is still ongoing
+                // In this case target is still receiving updates. We need to fallback.
+
+                // Target:
+                // Shard_id 1 -> replicas: A (ActiveRead)
+                // Shard_id 2 -> replicas: B (Active)
+                // We need to send to both target and fallback to ensure consistency.
 
                 // Target:
                 // Shard_id 1 -> replicas: A (Partial) B (Active)
@@ -710,10 +744,22 @@ impl ShardHolder {
                 // Shard_id 1 -> replicas: A (Partial) B (Dead)
                 // This is not possible, as we never deactivate last active replica
 
-                let is_all_replicas_in_partial = replicas.iter().any(|replica_set| {
-                    replica_set.check_peers_state_all(|state| state == ReplicaState::Partial)
+                // Target:
+                // Shard_id 1 -> replicas: A (ActiveRead) B (Dead)
+                // This is not possible, as we never deactivate last active replica
+
+                // Target:
+                // Shard_id 1 -> replicas: A (ActiveRead)
+                // We need to send to both target and fallback to ensure consistency.
+
+                // Target:
+                // Shard_id 1 -> replicas: A (Dead)
+                // Can be, if transfer failed. We just fallback.
+
+                let is_all_replicas_in_read_active = target_replicas.iter().any(|replica_set| {
+                    replica_set.check_peers_state_all(|state| state == ReplicaState::ActiveRead)
                 });
-                if is_all_replicas_in_partial {
+                if is_all_replicas_in_read_active {
                     Ok(vec![
                         (target_shard_ids, target),
                         (fallback_shard_ids, fallback),
@@ -762,13 +808,7 @@ impl ShardHolder {
     ) {
         let shard_number = collection_config.read().await.params.shard_number.get();
 
-        let (shard_ids_list, shard_id_to_key_mapping) = match collection_config
-            .read()
-            .await
-            .params
-            .sharding_method
-            .unwrap_or_default()
-        {
+        let (shard_ids_list, shard_id_to_key_mapping) = match self.sharding_method {
             ShardingMethod::Auto => {
                 let ids_list = (0..shard_number).collect::<Vec<_>>();
                 let shard_id_to_key_mapping = AHashMap::new();
@@ -1405,6 +1445,23 @@ impl ShardHolder {
         stream::iter(self.shards.iter())
             .any(|i| async { i.1.has_remote_shard().await })
             .await
+    }
+
+    /// Migrates the old shard-key format to the new one if necessary.
+    // TODO(1.17.0): Remove once the old shardkey format has been removed entirely.
+    fn migrate_shard_key_if_needed(
+        key_mapping: &SaveOnDisk<ShardKeyMapping>,
+    ) -> CollectionResult<()> {
+        if key_mapping.read().was_old_format {
+            // We automatically migrate to the new format when writing once, which we do here.
+            log::debug!("Migrating persisted shard key mapping to new format");
+            key_mapping.write(|i| {
+                // Also set this to true for consistency. However it should never be read.
+                i.was_old_format = false;
+            })?;
+        }
+
+        Ok(())
     }
 }
 

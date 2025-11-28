@@ -4,6 +4,7 @@ package qdrant;
 option csharp_namespace = "Qdrant.Client.Grpc";
 
 import "json_with_int.proto";
+import "qdrant_common.proto";
 
 enum Datatype {
   Default = 0;
@@ -11,6 +12,10 @@ enum Datatype {
   Uint8 = 2;
   Float16 = 3;
 }
+
+// ---------------------------------------------
+// ------------- Collection Config -------------
+// ---------------------------------------------
 
 message VectorParams {
   uint64 size = 1; // Size of the vectors
@@ -637,6 +642,7 @@ enum ReplicaState {
   Recovery = 6; // Shard is undergoing recovered by an external node; Normally rejects updates, accepts updates if force is true
   Resharding = 7; // Points are being migrated to this shard as part of scale-up resharding
   ReshardingScaleDown = 8; // Points are being migrated to this shard as part of scale-down resharding
+  ActiveRead = 9; // Active for readers, Partial for writers
 }
 
 message ShardKey {
@@ -723,6 +729,12 @@ message RestartTransfer {
   ShardTransferMethod method = 4;
 }
 
+message ReplicatePoints {
+    ShardKey from_shard_key = 1; // Source shard key
+    ShardKey to_shard_key = 2; // Target shard key
+    optional Filter filter = 3; // If set - only points matching the filter will be replicated
+}
+
 enum ShardTransferMethod {
   StreamRecords = 0; // Stream shard records in batches
   Snapshot = 1; // Snapshot the shard and recover it on the target peer
@@ -740,6 +752,7 @@ message CreateShardKey {
   optional uint32 shards_number = 2; // Number of shards to create per shard key
   optional uint32 replication_factor = 3; // Number of replicas of each shard to create
   repeated uint64 placement = 4; // List of peer ids, allowed to create shards. If empty - all peers are allowed
+  optional ReplicaState initial_state = 5; // Initial state of created replicas. Warning: use with care.
 }
 
 message DeleteShardKey {
@@ -756,6 +769,7 @@ message UpdateCollectionClusterSetupRequest {
     CreateShardKey create_shard_key = 7;
     DeleteShardKey delete_shard_key = 8;
     RestartTransfer restart_transfer = 9;
+    ReplicatePoints replicate_points = 10;
   }
   optional uint64 timeout = 6; // Wait timeout for operation commit in seconds, if not specified - default value will be supplied
 }

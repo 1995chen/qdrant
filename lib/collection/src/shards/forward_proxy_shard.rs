@@ -340,8 +340,8 @@ impl ForwardProxyShard {
             .await
     }
 
-    pub fn snapshot_manifest(&self) -> CollectionResult<SnapshotManifest> {
-        self.wrapped_shard.snapshot_manifest()
+    pub async fn snapshot_manifest(&self) -> CollectionResult<SnapshotManifest> {
+        self.wrapped_shard.snapshot_manifest().await
     }
 
     pub async fn on_optimizer_config_update(&self) -> CollectionResult<()> {
@@ -356,12 +356,19 @@ impl ForwardProxyShard {
         self.wrapped_shard.trigger_optimizers();
     }
 
-    pub async fn get_telemetry_data(&self, detail: TelemetryDetail) -> LocalShardTelemetry {
-        self.wrapped_shard.get_telemetry_data(detail).await
+    pub async fn get_telemetry_data(
+        &self,
+        detail: TelemetryDetail,
+        timeout: Duration,
+    ) -> CollectionResult<LocalShardTelemetry> {
+        self.wrapped_shard.get_telemetry_data(detail, timeout).await
     }
 
-    pub async fn get_optimization_status(&self) -> OptimizersStatus {
-        self.wrapped_shard.get_optimization_status().await
+    pub async fn get_optimization_status(
+        &self,
+        timeout: Duration,
+    ) -> CollectionResult<OptimizersStatus> {
+        self.wrapped_shard.get_optimization_status(timeout).await
     }
 
     pub async fn get_size_stats(&self) -> SizeStats {
@@ -402,9 +409,19 @@ impl ShardOperation for ForwardProxyShard {
 
         let _update_lock = self.update_lock.lock().await;
 
+        // Shard update is within a write lock scope, because we need a way to block the shard updates
+        // during the transfer restart and finalization.
+
+        // We always have to wait for the result of the update, cause after we release the lock,
+        // the transfer needs to have access to the latest version of points.
+        let mut result = self
+            .wrapped_shard
+            .update(operation.clone(), true, hw_measurement_acc.clone())
+            .await?;
+
         let points_matching_filter_before = {
             if let Some(filter) = &self.filter
-                && let Some(point_ids) = operation.operation.point_ids()
+                && let Some(point_ids) = operation.operation.upsert_point_ids()
             {
                 let filter = filter.clone();
 
@@ -427,20 +444,12 @@ impl ShardOperation for ForwardProxyShard {
                 // Operation is applicable to a subset of points, only forward those
                 Some(affected_points)
             } else {
-                // Global operation, we need to forward it as-is
+                // If operation doesn't create new points, we can safely forward it as-is
+                // Worst-case, it will error out with "point not found" on the remote side
+                // Which we will ignore anyway
                 None
             }
         };
-
-        // Shard update is within a write lock scope, because we need a way to block the shard updates
-        // during the transfer restart and finalization.
-
-        // We always have to wait for the result of the update, cause after we release the lock,
-        // the transfer needs to have access to the latest version of points.
-        let mut result = self
-            .wrapped_shard
-            .update(operation.clone(), true, hw_measurement_acc.clone())
-            .await?;
 
         let forward_operation = if let Some(ring) = &self.resharding_hash_ring {
             // If `ForwardProxyShard::resharding_hash_ring` is `Some`, we assume that proxy is used

@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::Receiver;
 use tokio::time::error::Elapsed;
+use tokio_util::task::AbortOnDropHandle;
 use tonic::transport::Uri;
 
 use super::CollectionContainer;
@@ -109,11 +110,32 @@ impl<C: CollectionContainer> ConsensusManager<C> {
         toc: Arc<C>,
         propose_sender: OperationSender,
         storage_path: &Path,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, StorageError> {
+        let mut wal = ConsensusOpWal::new(storage_path);
+
+        // When our Raft index and last snapshot index match, the last thing we did is apply a Raft
+        // snapshot. It is possible that we crashed before clearing the WAL, so we still do it now.
+        // Specifically, if the last operation was applying a snapshot and our WAL does still have
+        // older Raft entries, we clear the whole WAL. Consensus will take care of us catching up
+        // with the rest.
+        // See `apply_snapshot` function and <https://github.com/qdrant/qdrant/pull/7577>.
+        let raft_index = persistent_state.state().hard_state.commit;
+        let snapshot_index = persistent_state.latest_snapshot_meta.index;
+        let last_operation_was_snapshot = raft_index == persistent_state.latest_snapshot_meta.index;
+        if last_operation_was_snapshot
+            && let Ok(Some(last)) = wal.last_entry()
+            && last.index < snapshot_index
+        {
+            log::warn!(
+                "Consensus WAL was not cleared after applying consensus snapshot, clearing it now"
+            );
+            wal.clear()?;
+        }
+
+        Ok(Self {
             persistent: RwLock::new(persistent_state),
             is_leader_established: Arc::new(IsReady::default()),
-            wal: Mutex::new(ConsensusOpWal::new(storage_path)),
+            wal: Mutex::new(wal),
             soft_state: RwLock::new(None),
             toc,
             on_consensus_op_apply: Default::default(),
@@ -123,7 +145,7 @@ impl<C: CollectionContainer> ConsensusManager<C> {
             }),
             message_send_failures: Default::default(),
             next_peer_metadata_update_attempt: Mutex::new(Instant::now()),
-        }
+        })
     }
 
     pub fn report_snapshot(
@@ -553,13 +575,19 @@ impl<C: CollectionContainer> ConsensusManager<C> {
         } = snapshot.get_data().try_into()?;
 
         self.toc.apply_collections_snapshot(collections_data)?;
-        self.wal.lock().clear()?;
         self.persistent.write().update_from_snapshot(
             meta,
             address_by_id,
             metadata_by_id,
             cluster_metadata,
         )?;
+
+        // Clear now obsolete WAL entries after persisting new Raft state
+        // This way we prevent a crash due to an empty WAL if we crash right after clearing it,
+        // without bumping the Raft state. If we now crash after persisting the new state but
+        // before clearing the WAL, we will clear the WAL on next startup by truncating all entries
+        // above our commit.
+        self.wal.lock().clear()?;
 
         Ok(Ok(()))
     }
@@ -728,9 +756,10 @@ impl<C: CollectionContainer> ConsensusManager<C> {
 
         let is_leader_established = self.is_leader_established.clone();
 
-        let await_ready_for_timeout_future = tokio::task::spawn_blocking(move || {
-            is_leader_established.await_ready_for_timeout(wait_timeout)
-        });
+        let await_ready_for_timeout_future =
+            AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
+                is_leader_established.await_ready_for_timeout(wait_timeout)
+            }));
 
         let is_leader_established = await_ready_for_timeout_future
             .await
@@ -808,12 +837,13 @@ impl<C: CollectionContainer> ConsensusManager<C> {
         };
 
         debug_assert!(
-            last_applied_index >= first_entry.index - 1,
+            first_entry.index <= last_applied_index + 1,
             "Raft WAL is missing {} unapplied entries (last applied index: {}, first WAL entry index: {})",
             first_entry.index - last_applied_index - 1,
             last_applied_index,
             first_entry.index,
         );
+
         if last_applied_index.saturating_sub(first_entry.index) < min_entries_to_compact {
             return Ok(false);
         }
@@ -1271,7 +1301,8 @@ mod tests {
             Arc::new(NoCollections),
             OperationSender::new(sender),
             path,
-        );
+        )
+        .expect("initialize consensus manager");
         let mem_storage = MemStorage::new();
         mem_storage.wl().append(entries.as_ref()).unwrap();
         consensus_state.append_entries(entries).unwrap();

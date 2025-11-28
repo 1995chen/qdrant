@@ -15,6 +15,7 @@ use shard::locked_segment::LockedSegment;
 use shard::payload_index_schema::PayloadIndexSchema;
 use shard::segment_holder::{LockedSegmentHolder, SegmentHolder};
 use tokio::sync::oneshot;
+use tokio_util::task::AbortOnDropHandle;
 use wal::{Wal, WalOptions};
 
 use crate::operations::types::{CollectionError, CollectionResult};
@@ -23,11 +24,15 @@ use crate::update_handler::UpdateSignal;
 use crate::wal_delta::LockedWal;
 
 impl LocalShard {
-    pub fn snapshot_manifest(&self) -> CollectionResult<SnapshotManifest> {
-        self.segments()
-            .read()
-            .snapshot_manifest()
-            .map_err(CollectionError::from)
+    pub async fn snapshot_manifest(&self) -> CollectionResult<SnapshotManifest> {
+        let task = {
+            let _runtime = self.search_runtime.enter();
+
+            let segments = self.segments.clone();
+            cancel::blocking::spawn_cancel_on_drop(move |_| segments.read().snapshot_manifest())
+        };
+
+        Ok(task.await??)
     }
 
     pub fn restore_snapshot(snapshot_path: &Path) -> CollectionResult<()> {
@@ -92,7 +97,7 @@ impl LocalShard {
         let tar_c = tar.clone();
         let update_lock = self.update_operation_lock.clone();
 
-        tokio::task::spawn_blocking(move || {
+        let handle = tokio::task::spawn_blocking(move || {
             // Do not change segments while snapshotting
             snapshot_all_segments(
                 segments.clone(),
@@ -112,8 +117,8 @@ impl LocalShard {
             } else {
                 Self::snapshot_empty_wal(wal, &temp_path, &tar_c)
             }
-        })
-        .await??;
+        });
+        AbortOnDropHandle::new(handle).await??;
 
         LocalShardClocks::archive_data(&self.path, tar).await?;
 

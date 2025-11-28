@@ -24,13 +24,13 @@ use shard::retrieve::retrieve_blocking::retrieve_blocking;
 use shard::search::CoreSearchRequestBatch;
 use shard::search_result_aggregator::BatchResultAggregator;
 use tokio::runtime::Handle;
-use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 
 use super::holders::segment_holder::LockedSegmentHolder;
 use crate::collection_manager::holders::segment_holder::LockedSegment;
 use crate::collection_manager::probabilistic_search_sampling::find_search_sampling_over_point_distribution;
 use crate::config::CollectionConfigInternal;
-use crate::operations::types::CollectionResult;
+use crate::operations::types::{CollectionError, CollectionResult};
 use crate::optimizers_builder::DEFAULT_INDEXING_THRESHOLD_KB;
 
 type BatchOffset = usize;
@@ -52,7 +52,7 @@ pub struct SegmentsSearcher;
 impl SegmentsSearcher {
     /// Execute searches in parallel and return results in the same order as the searches were provided
     async fn execute_searches(
-        searches: Vec<JoinHandle<SegmentSearchExecutedResult>>,
+        searches: Vec<AbortOnDropHandle<SegmentSearchExecutedResult>>,
     ) -> CollectionResult<(BatchSearchResult, Vec<Vec<bool>>)> {
         let results_len = searches.len();
 
@@ -171,6 +171,7 @@ impl SegmentsSearcher {
         segments: LockedSegmentHolder,
         batch_request: &CoreSearchRequestBatch,
         collection_config: &CollectionConfigInternal,
+        search_runtime_handle: &Handle,
         is_stopped_guard: &StoppingGuard,
         hw_measurement_acc: HwMeasurementAcc,
     ) -> CollectionResult<Option<QueryContext>> {
@@ -196,8 +197,11 @@ impl SegmentsSearcher {
         );
 
         // Do blocking calls in a blocking task: `segment.get().read()` calls might block async runtime
-        let task = tokio::task::spawn_blocking(move || fill_query_context(query_context, segments))
-            .await?;
+        let task = AbortOnDropHandle::new(
+            search_runtime_handle
+                .spawn_blocking(move || fill_query_context(query_context, segments)),
+        )
+        .await?;
         Ok(task)
     }
 
@@ -246,6 +250,14 @@ impl SegmentsSearcher {
                             )
                         }
                     });
+
+                    // We MUST wrap the search handle in AbortOnDropHandle to ensure that we skip
+                    // all searches for futures that are already dropped. Not using this allows
+                    // users to create a humongous queue of search tasks, even though the searches
+                    // are already invalidated.
+                    // See: <https://github.com/qdrant/qdrant/pull/7530>
+                    let search = AbortOnDropHandle::new(search);
+
                     (segment, search)
                 })
                 .unzip()
@@ -286,7 +298,7 @@ impl SegmentsSearcher {
                             .collect(),
                     });
 
-                    res.push(runtime_handle.spawn_blocking(move || {
+                    let handle = runtime_handle.spawn_blocking(move || {
                         let segment_query_context =
                             query_context_arc_segment.get_segment_query_context();
 
@@ -296,7 +308,16 @@ impl SegmentsSearcher {
                             false,
                             &segment_query_context,
                         )
-                    }))
+                    });
+
+                    // We MUST wrap the search handle in AbortOnDropHandle to ensure that we skip
+                    // all searches for futures that are already dropped. Not using this allows
+                    // users to create a humongous queue of search tasks, even though the searches
+                    // are already invalidated.
+                    // See: <https://github.com/qdrant/qdrant/pull/7530>
+                    let handle = AbortOnDropHandle::new(handle);
+
+                    res.push(handle);
                 }
                 res
             };
@@ -344,27 +365,25 @@ impl SegmentsSearcher {
         hw_measurement_acc: HwMeasurementAcc,
     ) -> CollectionResult<AHashMap<PointIdType, RecordInternal>> {
         let stopping_guard = StoppingGuard::new();
-        let points = runtime_handle
-            .spawn_blocking({
-                let segments = segments.clone();
-                let points = points.to_vec();
-                let with_payload = with_payload.clone();
-                let with_vector = with_vector.clone();
-                let is_stopped = stopping_guard.get_is_stopped();
-                // TODO create one Task per segment level retrieve
-                move || {
-                    retrieve_blocking(
-                        segments,
-                        &points,
-                        &with_payload,
-                        &with_vector,
-                        &is_stopped,
-                        hw_measurement_acc,
-                    )
-                }
-            })
-            .await??;
-        Ok(points)
+        let points = runtime_handle.spawn_blocking({
+            let segments = segments.clone();
+            let points = points.to_vec();
+            let with_payload = with_payload.clone();
+            let with_vector = with_vector.clone();
+            let is_stopped = stopping_guard.get_is_stopped();
+            // TODO create one Task per segment level retrieve
+            move || {
+                retrieve_blocking(
+                    segments,
+                    &points,
+                    &with_payload,
+                    &with_vector,
+                    &is_stopped,
+                    hw_measurement_acc,
+                )
+            }
+        });
+        Ok(AbortOnDropHandle::new(points).await??)
     }
 
     pub async fn read_filtered(
@@ -376,26 +395,25 @@ impl SegmentsSearcher {
         let stopping_guard = StoppingGuard::new();
         // cloning filter spawning task
         let filter = filter.cloned();
-        runtime_handle
-            .spawn_blocking(move || {
-                let is_stopped = stopping_guard.get_is_stopped();
-                let segments = segments.read();
-                let hw_counter = hw_measurement_acc.get_counter_cell();
-                let all_points: BTreeSet<_> = segments
-                    .non_appendable_then_appendable_segments()
-                    .flat_map(|segment| {
-                        segment.get().read().read_filtered(
-                            None,
-                            None,
-                            filter.as_ref(),
-                            &is_stopped,
-                            &hw_counter,
-                        )
-                    })
-                    .collect();
-                Ok(all_points)
-            })
-            .await?
+        let points = runtime_handle.spawn_blocking(move || {
+            let is_stopped = stopping_guard.get_is_stopped();
+            let segments = segments.read();
+            let hw_counter = hw_measurement_acc.get_counter_cell();
+            let all_points: BTreeSet<_> = segments
+                .non_appendable_then_appendable_segments()
+                .flat_map(|segment| {
+                    segment.get().read().read_filtered(
+                        None,
+                        None,
+                        filter.as_ref(),
+                        &is_stopped,
+                        &hw_counter,
+                    )
+                })
+                .collect();
+            Ok(all_points)
+        });
+        AbortOnDropHandle::new(points).await?
     }
 
     /// Rescore results with a formula that can reference payload values.
@@ -414,7 +432,7 @@ impl SegmentsSearcher {
             segments_guard
                 .non_appendable_then_appendable_segments()
                 .map(|segment| {
-                    runtime_handle.spawn_blocking({
+                    let handle = runtime_handle.spawn_blocking({
                         let segment = segment.clone();
                         let arc_ctx = arc_ctx.clone();
                         let hw_counter = hw_measurement_acc.get_counter_cell();
@@ -424,7 +442,8 @@ impl SegmentsSearcher {
                                 .read()
                                 .rescore_with_formula(arc_ctx, &hw_counter)
                         }
-                    })
+                    });
+                    AbortOnDropHandle::new(handle)
                 })
                 .collect::<FuturesUnordered<_>>()
         };
@@ -533,6 +552,12 @@ fn search_in_segment(
     use_sampling: bool,
     segment_query_context: &SegmentQueryContext,
 ) -> CollectionResult<(Vec<Vec<ScoredPoint>>, Vec<bool>)> {
+    if segment_query_context.is_stopped() {
+        return Err(CollectionError::cancelled(
+            "Search in segment was cancelled",
+        ));
+    }
+
     let batch_size = request.searches.len();
 
     let mut result: Vec<Vec<ScoredPoint>> = Vec::with_capacity(batch_size);

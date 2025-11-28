@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use atomic_refcell::AtomicRefCell;
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::counter::iterator_hw_measurement::HwMeasurementIteratorExt;
 use common::either_variant::EitherVariant;
+use common::iterator_ext::IteratorExt;
 use common::types::PointOffsetType;
 use fs_err as fs;
 use schemars::_serde_json::Value;
@@ -270,11 +272,11 @@ impl StructPayloadIndex {
             }
             self.config.skip_rocksdb.replace(true);
 
-            // Clean-up all existing indices
+            // Wipe all existing indices
             for index in indexes.drain(..) {
-                index.cleanup().map_err(|err| {
+                index.wipe().map_err(|err| {
                     OperationError::service_error(format!(
-                        "Failed to clean up payload index for field `{field}` before rebuild: {err}"
+                        "Failed to delete existing payload index for field `{field}` before rebuild: {err}"
                     ))
                 })?;
             }
@@ -617,13 +619,15 @@ impl StructPayloadIndex {
         id_tracker: &'a IdTrackerSS,
         query_cardinality: &'a CardinalityEstimation,
         hw_counter: &'a HardwareCounterCell,
+        is_stopped: &'a AtomicBool,
     ) -> impl Iterator<Item = PointOffsetType> + 'a {
         if query_cardinality.primary_clauses.is_empty() {
             let full_scan_iterator = id_tracker.iter_internal();
             let struct_filtered_context = self.struct_filtered_context(filter, hw_counter);
             // Worst case: query expected to return few matches, but index can't be used
-            let matched_points =
-                full_scan_iterator.filter(move |i| struct_filtered_context.check(*i));
+            let matched_points = full_scan_iterator
+                .stop_if(is_stopped)
+                .filter(move |i| struct_filtered_context.check(*i));
 
             EitherVariant::A(matched_points)
         } else {
@@ -643,7 +647,8 @@ impl StructPayloadIndex {
                     .iter_conditions()
                     .all(|condition| query_cardinality.is_primary(condition));
 
-                let joined_primary_iterator = primary_iterators.into_iter().flatten();
+                let joined_primary_iterator =
+                    primary_iterators.into_iter().flatten().stop_if(is_stopped);
 
                 return if all_conditions_are_primary {
                     // All conditions are primary clauses,
@@ -666,8 +671,10 @@ impl StructPayloadIndex {
             // and applying full filter.
             let struct_filtered_context = self.struct_filtered_context(filter, hw_counter);
 
-            let iter = id_tracker
-                .iter_internal()
+            let id_tracker_iterator = id_tracker.iter_internal();
+
+            let iter = id_tracker_iterator
+                .stop_if(is_stopped)
                 .measure_hw_with_cell(hw_counter, size_of::<PointOffsetType>(), |i| {
                     i.cpu_counter()
                 })
@@ -890,7 +897,7 @@ impl PayloadIndex for StructPayloadIndex {
 
         if let Some(indexes) = removed_indexes {
             for index in indexes {
-                index.cleanup()?;
+                index.wipe()?;
             }
         }
 
@@ -945,12 +952,19 @@ impl PayloadIndex for StructPayloadIndex {
         &self,
         query: &Filter,
         hw_counter: &HardwareCounterCell,
+        is_stopped: &AtomicBool,
     ) -> Vec<PointOffsetType> {
         // Assume query is already estimated to be small enough so we can iterate over all matched ids
         let query_cardinality = self.estimate_cardinality(query, hw_counter);
         let id_tracker = self.id_tracker.borrow();
-        self.iter_filtered_points(query, &*id_tracker, &query_cardinality, hw_counter)
-            .collect()
+        self.iter_filtered_points(
+            query,
+            &*id_tracker,
+            &query_cardinality,
+            hw_counter,
+            is_stopped,
+        )
+        .collect()
     }
 
     fn indexed_points(&self, field: PayloadKeyTypeRef) -> usize {

@@ -1,6 +1,6 @@
 [package]
 name = "qdrant"
-version = "1.15.6-dev"
+version = "1.16.2-dev"
 description = "Qdrant - Vector Search engine"
 authors = [
     "Andrey Vasnetsov <andrey@vasnetsov.com>",
@@ -18,7 +18,7 @@ default-run = "qdrant"
 workspace = true
 
 [features]
-default = ["rocksdb"]
+default = []
 service_debug = ["parking_lot/deadlock_detection"]
 tracing = [
     "api/tracing",
@@ -37,6 +37,7 @@ data-consistency-check = ["collection/data-consistency-check"]
 gpu = ["gpu/gpu", "segment/gpu"]
 deb = []
 rocksdb = ["collection/rocksdb", "segment/rocksdb"]
+staging = ["collection/staging", "storage/staging"]
 
 [dev-dependencies]
 serde_urlencoded = "0.7"
@@ -44,6 +45,7 @@ sealed_test = "1.1.0"
 
 tempfile = { workspace = true }
 rusty-hook = "^0.11.2"
+nix = { workspace = true, features = ["process"] }
 
 mockito = "1.7"
 
@@ -70,10 +72,12 @@ uuid = { workspace = true }
 sys-info = "0.9.1"
 wal = { workspace = true }
 ordered-float = { workspace = true }
+ahash = { workspace = true }
 
 config = { version = "0.15.13", default-features = false, features = ["yaml"] }
 
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 
 actix-cors = "0.7.1"
 actix-files = "0.6.6"
@@ -85,7 +89,7 @@ tower = { version = "0.5.2", features = ["util"] }
 tower-layer = "0.3.3"
 reqwest = { workspace = true }
 # rustls minor version must be synced with actix-web
-rustls = { version = "0.23.31", default-features = false, features = [
+rustls = { version = "0.23.35", default-features = false, features = [
     "logging",
     "std",
     "tls12",
@@ -204,7 +208,7 @@ bytemuck = { version = "1.24.0", features = [
 ] }
 bytes = "1.10.1"
 chrono = { version = "0.4.42", features = ["serde"] }
-clap = { version = "4.5.49", features = ["derive", "env"] }
+clap = { version = "4.5.53", features = ["derive", "env"] }
 criterion = "0.7.0"
 data-encoding = "2.9.0"
 delegate = "0.13.4"
@@ -222,8 +226,8 @@ half = { version = "2.7.0", features = [
 http = "1.3.1"
 humantime = "2.3.0"
 indexmap = { version = "2", features = ["serde"] }
-indicatif = { version = "0.18.0", features = ["rayon"] }
-integer-encoding = "4.0.2"
+indicatif = { version = "0.18.3", features = ["rayon"] }
+integer-encoding = "4.1.0"
 itertools = "0.14.0"
 log = "0.4.28"
 memmap2 = "0.9.8"
@@ -241,6 +245,7 @@ prost-wkt-types = "0.5"
 prost-for-raft = { package = "prost", version = "=0.11.9" } # version of prost used by raft
 raft = { version = "0.7.0", features = ["prost-codec"], default-features = false }
 rand = "0.9.2"
+rand_distr = "0.5.1"
 reqwest = { version = "0.12.24", default-features = false, features = [
     "json",
     "http2",
@@ -267,14 +272,14 @@ tap = "1.0.1"
 tar = "0.4.41"
 tempfile = "3.23.0"
 tokio = { version = "1.47.1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["io", "io-util"] }
+tokio-util = { version = "0.7", features = ["io", "io-util", "rt"] }
 tonic = { version = "0.11.0", features = ["gzip", "tls"] }
 tonic-build = { version = "0.11.0", features = ["prost"] }
 tonic-reflection = "0.11.0"
 tracing = { version = "0.1", features = ["async-await"] }
 uuid = { version = "1.18", features = ["v4", "serde"] }
 validator = { version = "0.20.0", features = ["derive"] }
-wal = { git = "https://github.com/qdrant/wal.git", rev = "95c4310efaef3c0be227f1b3aff35a1668452ae9" }
+wal = { git = "https://github.com/qdrant/wal.git", rev = "fbb2f2a1603222df3f8a34cc6ae2c93ceffbc172" }
 zerocopy = { version = "0.8.27", features = ["derive"] }
 atomic_refcell = "0.1.13"
 byteorder = "1.5.0"
@@ -294,6 +299,13 @@ required-features = ["service_debug"]
 [[bin]]
 name = "wal_inspector"
 path = "src/wal_inspector.rs"
+test = false
+bench = false
+required-features = ["service_debug"]
+
+[[bin]]
+name = "wal_pop"
+path = "src/wal_pop.rs"
 test = false
 bench = false
 required-features = ["service_debug"]

@@ -134,18 +134,26 @@ impl ShardTransferKey {
 }
 
 /// Methods for transferring a shard from one node to another.
+///
+/// - `stream_records` - Stream all shard records in batches until the whole shard is transferred.
+///
+/// - `snapshot` - Snapshot the shard, transfer and restore it on the receiver.
+///
+/// - `wal_delta` - Attempt to transfer shard difference by WAL delta.
+///
+/// - `resharding_stream_records` - Shard transfer for resharding: stream all records in batches until all points are transferred.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ShardTransferMethod {
-    /// Stream all shard records in batches until the whole shard is transferred.
+    // Stream all shard records in batches until the whole shard is transferred.
     #[default]
     StreamRecords,
-    /// Snapshot the shard, transfer and restore it on the receiver.
+    // Snapshot the shard, transfer and restore it on the receiver.
     Snapshot,
-    /// Attempt to transfer shard difference by WAL delta.
+    // Attempt to transfer shard difference by WAL delta.
     WalDelta,
-    /// Shard transfer for resharding: stream all records in batches until all points are
-    /// transferred.
+    // Shard transfer for resharding: stream all records in batches until all points are
+    // transferred.
     ReshardingStreamRecords,
 }
 
@@ -245,6 +253,72 @@ pub trait ShardTransferConsensus: Send + Sync {
         result.map_err(|err| {
             CollectionError::service_error(format!(
                 "Failed to confirm recovered operation on consensus after {CONSENSUS_CONFIRM_RETRIES} retries: {err}",
+            ))
+        })
+    }
+
+    /// After a stream records transfer between different shard IDs, propose to switch shard to
+    /// `ActiveRead` and confirm on remote shard
+    ///
+    /// This is called after shard stream records has been completed on the remote.
+    /// It submits a proposal to consensus to switch the shard state from `Partial` to `ActiveRead`.
+    ///
+    /// This method also confirms consensus applied the operation on ALL peers before returning. If
+    /// it fails, it will be retried for up to `CONSENSUS_CONFIRM_RETRIES` times.
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe.
+    async fn switch_partial_to_read_active_confirm_peers(
+        &self,
+        channel_service: &ChannelService,
+        collection_id: &CollectionId,
+        remote_shard: &RemoteShard,
+    ) -> CollectionResult<()> {
+        let mut result = Err(CollectionError::service_error(
+            "`switch_partial_to_read_active_confirm_peers` exit without attempting any work, \
+             this is a programming error",
+        ));
+
+        for attempt in 0..CONSENSUS_CONFIRM_RETRIES {
+            if attempt > 0 {
+                sleep(CONSENSUS_CONFIRM_RETRY_DELAY).await;
+            }
+
+            log::trace!(
+                "Propose and confirm to switch peer from `Partial` into `ActiveRead` state"
+            );
+
+            result = self
+                .set_shard_replica_set_state(
+                    Some(remote_shard.peer_id),
+                    collection_id.clone(),
+                    remote_shard.id,
+                    ReplicaState::ActiveRead,
+                    Some(ReplicaState::Partial),
+                )
+                .await;
+
+            if let Err(err) = &result {
+                log::error!("Failed to propose state switch operation to consensus: {err}");
+                continue;
+            }
+
+            log::trace!("Wait for all peers to reach `ActiveRead` state");
+
+            result = self.await_consensus_sync(channel_service).await;
+
+            match &result {
+                Ok(()) => break,
+                Err(err) => {
+                    log::error!("Failed to confirm state switch operation on consensus: {err}");
+                }
+            }
+        }
+
+        result.map_err(|err| {
+            CollectionError::service_error(format!(
+                "Failed to confirm state switch operation on consensus after {CONSENSUS_CONFIRM_RETRIES} retries: {err}",
             ))
         })
     }
@@ -415,61 +489,20 @@ pub trait ShardTransferConsensus: Send + Sync {
 
     /// Set the shard replica state on this peer through consensus
     ///
+    /// If the peer ID is not provided, this will set the replica state for the current peer.
+    ///
     /// # Warning
     ///
     /// This only submits a proposal to consensus. Calling this does not guarantee that consensus
     /// will actually apply the operation across the cluster.
     async fn set_shard_replica_set_state(
         &self,
+        peer_id: Option<PeerId>,
         collection_id: CollectionId,
         shard_id: ShardId,
         state: ReplicaState,
         from_state: Option<ReplicaState>,
     ) -> CollectionResult<()>;
-
-    /// Propose to set the shard replica state on this peer through consensus
-    ///
-    /// This internally confirms and retries a few times if needed to ensure consensus picks up the
-    /// operation.
-    async fn set_shard_replica_set_state_confirm_and_retry(
-        &self,
-        collection_id: &CollectionId,
-        shard_id: ShardId,
-        state: ReplicaState,
-        from_state: Option<ReplicaState>,
-    ) -> CollectionResult<()> {
-        let mut result = Err(CollectionError::service_error(
-            "`set_shard_replica_set_state_confirm_and_retry` exit without attempting any work, \
-             this is a programming error",
-        ));
-
-        for attempt in 0..CONSENSUS_CONFIRM_RETRIES {
-            if attempt > 0 {
-                sleep(CONSENSUS_CONFIRM_RETRY_DELAY).await;
-            }
-
-            log::trace!("Propose and confirm set shard replica set state");
-            result = self
-                .set_shard_replica_set_state(collection_id.clone(), shard_id, state, from_state)
-                .await;
-
-            match &result {
-                Ok(()) => break,
-                Err(err) => {
-                    log::error!(
-                        "Failed to confirm set shard replica set state operation on consensus: {err}"
-                    );
-                }
-            }
-        }
-
-        result.map_err(|err| {
-            CollectionError::service_error(format!(
-                "Failed to set shard replica set state through consensus \
-                 after {CONSENSUS_CONFIRM_RETRIES} retries: {err}"
-            ))
-        })
-    }
 
     /// Propose to commit the read hash ring.
     ///

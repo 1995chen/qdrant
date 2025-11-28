@@ -1,8 +1,8 @@
 import concurrent.futures
 import pathlib
 import threading
-import time
 
+from .custom_sharding import create_collection_with_custom_sharding, create_shard, delete_shard
 from .fixtures import *
 from .utils import *
 
@@ -11,65 +11,6 @@ N_SHARDS = 1
 N_REPLICAS = 1
 
 COLLECTION_NAME = "test_collection"
-
-
-def create_collection_with_custom_sharding(
-        peer_url,
-        collection=COLLECTION_NAME,
-        shard_number=1,
-        replication_factor=1,
-        write_consistency_factor=1,
-        timeout=10
-):
-    # Create collection in peer_url
-    r_batch = requests.put(
-        f"{peer_url}/collections/{collection}?timeout={timeout}", json={
-            "vectors": {
-                "size": 4,
-                "distance": "Dot"
-            },
-            "shard_number": shard_number,
-            "replication_factor": replication_factor,
-            "write_consistency_factor": write_consistency_factor,
-            "sharding_method": "custom",
-        })
-    assert_http_ok(r_batch)
-
-
-def create_shard(
-        peer_url,
-        collection,
-        shard_key,
-        shard_number=1,
-        replication_factor=1,
-        placement=None,
-        initial_state=None,
-        timeout=10
-):
-    r_batch = requests.put(
-        f"{peer_url}/collections/{collection}/shards?timeout={timeout}", json={
-            "shard_key": shard_key,
-            "shards_number": shard_number,
-            "replication_factor": replication_factor,
-            "placement": placement,
-            "initial_state": initial_state,
-        })
-    assert_http_ok(r_batch)
-
-
-def delete_shard(
-        peer_url,
-        collection,
-        shard_key,
-        timeout=10
-):
-    r_batch = requests.post(
-        f"{peer_url}/collections/{collection}/shards/delete?timeout={timeout}",
-        json={
-            "shard_key": shard_key,
-        }
-    )
-    assert_http_ok(r_batch)
 
 
 def test_shard_consistency(tmp_path: pathlib.Path):
@@ -307,7 +248,7 @@ def test_create_shard_key_read_availability(tmp_path: pathlib.Path):
     peer_urls, _, _ = start_cluster(tmp_path, N_PEERS)
 
     # Wait until all peers submit their metadata to consensus 🙄
-    wait_for_peer_metadata(peer_urls[0], )
+    wait_for_peer_metadata(peer_urls[0])
 
     create_collection_with_custom_sharding(peer_urls[0], shard_number = N_SHARDS, replication_factor = N_PEERS)
     wait_collection_exists_and_active_on_all_peers(collection_name = COLLECTION_NAME, peer_api_uris = peer_urls)
@@ -332,6 +273,7 @@ def test_create_shard_key_read_availability(tmp_path: pathlib.Path):
 
     # Assert that all search requests succeeded while custom shard was being created
     assert all(search_future.result() for search_future in concurrent.futures.as_completed(search_futures))
+
 
 def test_shard_key_initial_state_partial(tmp_path: pathlib.Path):
     """
@@ -389,6 +331,7 @@ def wait_for_peer_metadata(peer_url: str):
         print(json.dumps(get_telemetry(peer_url), indent = 2))
         raise e
 
+
 def check_peer_metadata(peer_url: str):
     telemetry = get_telemetry(peer_url)
 
@@ -399,11 +342,13 @@ def check_peer_metadata(peer_url: str):
 
     return metadata and peers and all(metadata.get(peer) for peer in peers)
 
+
 def get_telemetry(peer_url: str):
     resp = requests.get(f"{peer_url}/telemetry?details_level=3")
     assert_http_ok(resp)
 
     return resp.json()["result"]
+
 
 def try_search_random(peer_url: str, cancel: threading.Event):
     while not cancel.is_set():

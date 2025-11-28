@@ -6,6 +6,7 @@ use std::time::Duration;
 use common::defaults;
 use fs_err::tokio as tokio_fs;
 use parking_lot::Mutex;
+use tokio_util::task::AbortOnDropHandle;
 
 use super::Collection;
 use crate::operations::cluster_ops::ReshardingDirection;
@@ -112,7 +113,7 @@ impl Collection {
 
                 let shard = LocalShard::build(
                     to_shard_id,
-                    self.name(),
+                    self.name().to_string(),
                     &to_replica_set.shard_path,
                     self.collection_config.clone(),
                     self.shared_storage_config.clone(),
@@ -412,9 +413,9 @@ impl Collection {
         let collection_path = self.path.clone();
 
         async move {
-            let shards_holder = shards_holder.read_owned().await;
+            let shards_holder_guard = shards_holder.clone().read_owned().await;
 
-            let Some(replica_set) = shards_holder.get_shard(shard_id) else {
+            let Some(replica_set) = shards_holder_guard.get_shard(shard_id) else {
                 return Err(CollectionError::service_error(format!(
                     "Shard {shard_id} doesn't exist, repartition is not supported yet"
                 )));
@@ -426,9 +427,74 @@ impl Collection {
                 .wait_for_local(defaults::CONSENSUS_META_OP_WAIT)
                 .await?;
 
-            if !replica_set.is_local().await {
+            let this_peer_id = replica_set.this_peer_id();
+
+            let shard_transfer_requested = tokio::task::spawn_blocking(move || {
+                // We can guarantee that replica_set is not None, cause we checked it before
+                // and `shards_holder` is holding the lock.
+                // This is a workaround for lifetime checker.
+                let replica_set = shards_holder_guard.get_shard(shard_id).unwrap();
+                let shard_transfer_registered = shards_holder_guard.shard_transfers.wait_for(
+                    |shard_transfers| {
+                        shard_transfers.iter().any(|shard_transfer| {
+                            let to_shard_id = shard_transfer
+                                .to_shard_id
+                                .unwrap_or(shard_transfer.shard_id);
+                            to_shard_id == shard_id && shard_transfer.to == this_peer_id
+                        })
+                    },
+                    Duration::from_secs(60),
+                );
+
+                // It is not enough to check for shard_transfer_registered,
+                // because it is registered before the state of the shard is changed.
+                shard_transfer_registered
+                    && replica_set.wait_for_state_condition_sync(
+                        |state| {
+                            state
+                                .get_peer_state(this_peer_id)
+                                .is_some_and(|peer_state| peer_state.is_partial_or_recovery())
+                        },
+                        defaults::CONSENSUS_META_OP_WAIT,
+                    )
+            });
+
+            match AbortOnDropHandle::new(shard_transfer_requested).await {
+                Ok(true) => Ok(()),
+
+                Ok(false) => {
+                    let description = "\
+                        Failed to initiate shard transfer: \
+                        Didn't receive shard transfer notification from consensus in 60 seconds";
+
+                    Err(CollectionError::Timeout {
+                        description: description.into(),
+                    })
+                }
+
+                Err(err) => Err(CollectionError::service_error(format!(
+                    "Failed to initiate shard transfer: \
+                     Failed to execute wait-for-consensus-notification task: \
+                     {err}"
+                ))),
+            }?;
+
+            // At this point we made sure that receiver replica is synced and expecting incoming
+            // shard transfer.
+            // Further checks are an extra safety net, in normal situation they should not fail.
+
+            let shards_holder_guard = shards_holder.read_owned().await;
+
+            let Some(replica_set) = shards_holder_guard.get_shard(shard_id) else {
+                return Err(CollectionError::service_error(format!(
+                    "Shard {shard_id} doesn't exist, repartition is not supported yet"
+                )));
+            };
+
+            if replica_set.is_proxy().await {
+                debug_assert!(false, "We should not have proxy shard here");
                 // We have proxy or something, we need to unwrap it
-                log::warn!("Unwrapping proxy shard {shard_id}");
+                log::error!("Unwrapping proxy shard {shard_id}");
                 replica_set.un_proxify_local().await?;
             }
 
@@ -454,57 +520,7 @@ impl Collection {
                 }
             }
 
-            let this_peer_id = replica_set.this_peer_id();
-
-            let shard_transfer_requested = tokio::task::spawn_blocking(move || {
-                // We can guarantee that replica_set is not None, cause we checked it before
-                // and `shards_holder` is holding the lock.
-                // This is a workaround for lifetime checker.
-                let replica_set = shards_holder.get_shard(shard_id).unwrap();
-                let shard_transfer_registered = shards_holder.shard_transfers.wait_for(
-                    |shard_transfers| {
-                        shard_transfers.iter().any(|shard_transfer| {
-                            let to_shard_id = shard_transfer
-                                .to_shard_id
-                                .unwrap_or(shard_transfer.shard_id);
-                            to_shard_id == shard_id && shard_transfer.to == this_peer_id
-                        })
-                    },
-                    Duration::from_secs(60),
-                );
-
-                // It is not enough to check for shard_transfer_registered,
-                // because it is registered before the state of the shard is changed.
-                shard_transfer_registered
-                    && replica_set.wait_for_state_condition_sync(
-                        |state| {
-                            state
-                                .get_peer_state(this_peer_id)
-                                .is_some_and(|peer_state| peer_state.is_partial_or_recovery())
-                        },
-                        defaults::CONSENSUS_META_OP_WAIT,
-                    )
-            });
-
-            match shard_transfer_requested.await {
-                Ok(true) => Ok(()),
-
-                Ok(false) => {
-                    let description = "\
-                        Failed to initiate shard transfer: \
-                        Didn't receive shard transfer notification from consensus in 60 seconds";
-
-                    Err(CollectionError::Timeout {
-                        description: description.into(),
-                    })
-                }
-
-                Err(err) => Err(CollectionError::service_error(format!(
-                    "Failed to initiate shard transfer: \
-                     Failed to execute wait-for-consensus-notification task: \
-                     {err}"
-                ))),
-            }
+            Ok(())
         }
     }
 

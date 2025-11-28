@@ -27,7 +27,7 @@ use crate::data_types::query_context::VectorQueryContext;
 use crate::data_types::vectors::{QueryVector, VectorInternal, VectorRef};
 use crate::id_tracker::IdTrackerSS;
 use crate::index::field_index::CardinalityEstimation;
-use crate::index::hnsw_index::point_scorer::FilteredScorer;
+use crate::index::hnsw_index::point_scorer::BatchFilteredSearcher;
 use crate::index::query_estimator::adjust_to_available_vectors;
 use crate::index::sparse_index::sparse_index_config::SparseIndexConfig;
 use crate::index::sparse_index::sparse_search_telemetry::SparseSearchesTelemetry;
@@ -299,34 +299,34 @@ impl<TInvertedIndex: InvertedIndex> SparseVectorIndex<TInvertedIndex> {
 
         let is_stopped = vector_query_context.is_stopped();
 
-        let scorer = FilteredScorer::new(
-            query_vector.clone(),
+        let searcher = BatchFilteredSearcher::new(
+            &[query_vector],
             &vector_storage,
             None,
             None,
+            top,
             deleted_point_bitslice,
             vector_query_context.hardware_counter(),
         )?;
         let hw_counter = vector_query_context.hardware_counter();
-        match filter {
+        let mut results = match filter {
             Some(filter) => {
                 let payload_index = self.payload_index.borrow();
                 let mut filtered_points = match prefiltered_points {
                     Some(filtered_points) => filtered_points.iter().copied(),
                     None => {
-                        let filtered_points = payload_index.query_points(filter, &hw_counter);
+                        let filtered_points =
+                            payload_index.query_points(filter, &hw_counter, &is_stopped);
                         *prefiltered_points = Some(filtered_points);
                         prefiltered_points.as_ref().unwrap().iter().copied()
                     }
                 };
-                let res = scorer.peek_top_iter(&mut filtered_points, top, &is_stopped)?;
-                Ok(res)
+                searcher.peek_top_iter(&mut filtered_points, &is_stopped)?
             }
-            None => {
-                let res = scorer.peek_top_all(top, &is_stopped)?;
-                Ok(res)
-            }
-        }
+            None => searcher.peek_top_all(&is_stopped)?,
+        };
+        let res = results.pop().expect("single element results");
+        Ok(res)
     }
 
     pub fn search_plain(
@@ -353,7 +353,7 @@ impl<TInvertedIndex: InvertedIndex> SparseVectorIndex<TInvertedIndex> {
         let ids = match prefiltered_points {
             Some(filtered_points) => filtered_points.iter(),
             None => {
-                let filtered_points = payload_index.query_points(filter, &hw_counter);
+                let filtered_points = payload_index.query_points(filter, &hw_counter, &is_stopped);
                 *prefiltered_points = Some(filtered_points);
                 prefiltered_points.as_ref().unwrap().iter()
             }

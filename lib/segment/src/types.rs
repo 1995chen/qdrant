@@ -550,7 +550,7 @@ pub struct AcornSearchParams {
     /// If estimated filters selectivity is higher than this value,
     /// ACORN will not be used. Selectivity is estimated as:
     /// `estimated number of points satisfying the filters / total number of points`.
-    ///   
+    ///
     /// 0.0 for never, 1.0 for always. Default is 0.4.
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -629,7 +629,9 @@ impl Indexes {
 }
 
 /// Config of HNSW index
-#[derive(Debug, Deserialize, Serialize, JsonSchema, Validate, Anonymize, Clone, PartialEq, Eq)]
+#[derive(
+    Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize, JsonSchema, Validate, Anonymize,
+)]
 #[serde(rename_all = "snake_case")]
 #[anonymize(false)]
 pub struct HnswConfig {
@@ -684,7 +686,7 @@ impl HnswConfig {
             payload_m,
             on_disk,
             inline_storage,
-        } = self.clone();
+        } = *self;
 
         m != other.m
             || ef_construct != other.ef_construct
@@ -730,7 +732,7 @@ pub enum CompressionRatio {
     X64,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ScalarType {
     #[default]
@@ -2616,7 +2618,7 @@ type OrderedFloatPayloadType = OrderedFloat<FloatPayloadType>;
 /// Range filter request
 #[macro_rules_attribute::macro_rules_derive(crate::common::macros::schemars_rename_generics)]
 #[derive_args(< OrderedFloatPayloadType > => "Range", < DateTimePayloadType > => "DatetimeRange")]
-#[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Range<T> {
     /// point.key < range.lt

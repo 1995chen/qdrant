@@ -23,11 +23,23 @@ mod qdrant_edge {
     #[pymodule_export]
     use super::PyShard;
     #[pymodule_export]
-    use super::config::{
-        PyDistance, PyIndexes, PyMultiVectorComparator, PyMultiVectorConfig, PyPayloadStorageType,
-        PyQuantizationConfig, PySegmentConfig, PySparseVectorDataConfig, PyVectorDataConfig,
-        PyVectorStorageDatatype, PyVectorStorageType,
+    use super::config::quantization::{
+        PyBinaryQuantizationConfig, PyBinaryQuantizationEncoding,
+        PyBinaryQuantizationQueryEncoding, PyCompressionRatio, PyProductQuantizationConfig,
+        PyScalarQuantizationConfig, PyScalarType,
     };
+    #[pymodule_export]
+    use super::config::sparse_vector_data::{
+        PyModifier, PySparseIndexConfig, PySparseIndexType, PySparseVectorDataConfig,
+        PySparseVectorStorageType,
+    };
+    #[pymodule_export]
+    use super::config::vector_data::{
+        PyDistance, PyHnswIndexConfig, PyMultiVectorComparator, PyMultiVectorConfig,
+        PyPlainIndexConfig, PyVectorDataConfig, PyVectorStorageDatatype, PyVectorStorageType,
+    };
+    #[pymodule_export]
+    use super::config::{PyPayloadStorageType, PySegmentConfig};
     #[pymodule_export]
     use super::query::{
         PyDirection, PyFusion, PyMmr, PyOrderBy, PyPrefetch, PyQueryRequest, PySample,
@@ -74,9 +86,9 @@ impl PyShard {
         Ok(())
     }
 
-    pub fn query(&self, query: PyQueryRequest) -> Result<Vec<Vec<Vec<PyScoredPoint>>>> {
+    pub fn query(&self, query: PyQueryRequest) -> Result<Vec<PyScoredPoint>> {
         let points = self.0.query(query.into())?;
-        let points = PyScoredPoint::wrap_query_resp(points);
+        let points = PyScoredPoint::wrap_vec(points);
         Ok(points)
     }
 

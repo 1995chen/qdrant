@@ -108,6 +108,7 @@ impl Validate for grpc::update_collection_cluster_setup_request::Operation {
             Operation::CreateShardKey(op) => op.validate(),
             Operation::DeleteShardKey(op) => op.validate(),
             Operation::RestartTransfer(op) => op.validate(),
+            Operation::ReplicatePoints(op) => op.validate(),
         }
     }
 }
@@ -177,7 +178,27 @@ impl Validate for grpc::DeleteShardKey {
 
 impl Validate for grpc::RestartTransfer {
     fn validate(&self) -> Result<(), ValidationErrors> {
-        Ok(())
+        validate_shard_different_peers(
+            self.from_peer_id,
+            self.to_peer_id,
+            self.shard_id,
+            self.to_shard_id,
+        )
+    }
+}
+
+impl Validate for grpc::ReplicatePoints {
+    fn validate(&self) -> Result<(), ValidationErrors> {
+        if self.from_shard_key != self.to_shard_key {
+            return Ok(());
+        }
+
+        let mut errors = ValidationErrors::new();
+        errors.add(
+            "to_shard_key",
+            validator::ValidationError::new("must be different from from_shard_key"),
+        );
+        Err(errors)
     }
 }
 
@@ -255,6 +276,7 @@ impl Validate for grpc::FieldCondition {
 
 impl Validate for grpc::Vector {
     fn validate(&self) -> Result<(), ValidationErrors> {
+        #[expect(deprecated)]
         let grpc::Vector {
             data,
             indices,
