@@ -243,16 +243,31 @@ def check_data_in_cache(data_dir: Path) -> Optional[float]:
 
 
 def drop_caches(data_dir: Path = None, verbose: bool = True) -> bool:
-    """Drop OS page caches. Optionally verify with fincore."""
+    """Drop OS page caches. Optionally verify with fincore.
+
+    Returns True if cache was successfully dropped, False otherwise.
+    """
     before = get_cached_mb()
     before_pct = check_data_in_cache(data_dir) if data_dir else None
 
     try:
-        subprocess.run(["sudo", "sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"],
-                       check=True, capture_output=True)
-    except:
+        # Use -n for non-interactive sudo (fails immediately if no cached credentials)
+        result = subprocess.run(
+            ["sudo", "-n", "sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            if verbose:
+                err = result.stderr.strip() if result.stderr else "unknown error"
+                print(f"  Warning: couldn't drop caches: {err}")
+            return False
+    except subprocess.TimeoutExpired:
         if verbose:
-            print("  Warning: couldn't drop caches (needs sudo)")
+            print("  Warning: drop_caches timed out")
+        return False
+    except Exception as e:
+        if verbose:
+            print(f"  Warning: couldn't drop caches: {e}")
         return False
 
     after = get_cached_mb()
@@ -264,6 +279,8 @@ def drop_caches(data_dir: Path = None, verbose: bool = True) -> bool:
             msg += f", data: {before_pct:.0f}% -> {after_pct:.0f}% cached"
         print(msg)
 
+    # The drop_caches syscall is reliable - if it ran without error, it worked.
+    # Total system cache may not drop much if other processes are actively caching.
     return True
 
 
