@@ -16448,27 +16448,34 @@
         "description": "Optimizations progress for the collection",
         "type": "object",
         "required": [
-          "ongoing",
+          "optimizations",
           "pending"
         ],
         "properties": {
-          "ongoing": {
-            "description": "Ongoing optimizations from newest to oldest.",
+          "optimizations": {
+            "description": "Completed and ongoing optimizations. Sorted from newest to oldest.",
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/ProgressTree"
+              "$ref": "#/components/schemas/Optimization"
             }
-          },
-          "completed": {
-            "description": "Completed optimizations from newest to oldest.",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ProgressTree"
-            },
-            "nullable": true
           },
           "pending": {
             "$ref": "#/components/schemas/PendingOptimizations"
+          }
+        }
+      },
+      "Optimization": {
+        "type": "object",
+        "required": [
+          "progress",
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/TrackerStatus"
+          },
+          "progress": {
+            "$ref": "#/components/schemas/ProgressTree"
           }
         }
       },

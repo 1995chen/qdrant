@@ -9,6 +9,7 @@ use segment::common::anonymize::Anonymize;
 use serde::{Deserialize, Serialize};
 
 use super::holders::segment_holder::SegmentId;
+use crate::operations::types::Optimization;
 pub mod config_mismatch_optimizer;
 pub mod indexing_optimizer;
 pub mod merge_optimizer;
@@ -24,12 +25,6 @@ const KEEP_LAST_TRACKERS: usize = 16;
 #[derive(Default, Clone, Debug)]
 pub struct TrackerLog {
     descriptions: VecDeque<Tracker>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct IndexingProgressViews {
-    pub ongoing: Vec<ProgressView>,
-    pub completed: Vec<ProgressView>,
 }
 
 impl TrackerLog {
@@ -74,20 +69,33 @@ impl TrackerLog {
             .collect()
     }
 
-    pub fn progress_views(&self) -> IndexingProgressViews {
-        let mut ongoing = Vec::new();
-        let mut completed = Vec::new();
-        for tracker in self.descriptions.iter().rev() {
-            let state = tracker.state.lock();
-            match state.status {
-                TrackerStatus::Optimizing => ongoing.push(tracker.progress_view.clone()),
-
-                TrackerStatus::Done | TrackerStatus::Cancelled(_) | TrackerStatus::Error(_) => {
-                    completed.push(tracker.progress_view.clone());
-                }
+    pub fn optimizations(&self) -> impl Iterator<Item = OptimizationRef> + '_ {
+        self.descriptions.iter().map(|tracker| {
+            let status = tracker.state.lock().status.clone();
+            OptimizationRef {
+                status,
+                progress: tracker.progress_view.clone(),
             }
+        })
+    }
+}
+
+/// Can be converted into [`Optimization`].
+///
+/// The only reason to separate this structure from [`Optimization`] is to
+/// avoid calling [`ProgressView::snapshot`] when not needed.
+pub struct OptimizationRef {
+    pub status: TrackerStatus,
+    pub progress: ProgressView,
+}
+
+impl OptimizationRef {
+    pub fn snapshot(self) -> Optimization {
+        let OptimizationRef { status, progress } = self;
+        Optimization {
+            status,
+            progress: progress.snapshot("Segment Optimizing"),
         }
-        IndexingProgressViews { ongoing, completed }
     }
 }
 

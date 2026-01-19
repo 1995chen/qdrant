@@ -16,20 +16,8 @@ def test_optimizations(collection_name):
         api="/collections/{collection_name}/optimizations",
         method="GET",
         path_params={"collection_name": collection_name},
-    )
-    assert response.ok
-    result = response.json()["result"]
-    assert result["ongoing"] == []
-    assert "completed" not in result
-
-
-    response = request_with_validation(
-        api="/collections/{collection_name}/optimizations",
-        method="GET",
-        path_params={"collection_name": collection_name},
         query_params={"completed": 'true'},
     )
     assert response.ok
     result = response.json()["result"]
-    assert result["ongoing"] == []
-    assert result["completed"] == []
+    assert result["optimizations"] == []

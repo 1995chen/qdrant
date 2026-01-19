@@ -51,6 +51,7 @@ use uuid::Uuid;
 use validator::{Validate, ValidationError, ValidationErrors};
 
 use super::ClockTag;
+use crate::collection_manager::optimizers::TrackerStatus;
 use crate::config::{CollectionConfigInternal, CollectionParams, WalConfig};
 use crate::operations::cluster_ops::ReshardingDirection;
 use crate::operations::config_diff::{HnswConfigDiff, QuantizationConfigDiff};
@@ -297,15 +298,16 @@ pub struct CollectionClusterInfo {
 /// Optimizations progress for the collection
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct OptimizationsResponse {
-    /// Ongoing optimizations from newest to oldest.
-    pub ongoing: Vec<ProgressTree>,
-    /// Completed optimizations from newest to oldest.
-    // NOTE: `None` when `?completed=false`,
-    //        empty vec when `?completed=true` but no completed optimizations.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub completed: Option<Vec<ProgressTree>>,
+    /// Completed and ongoing optimizations. Sorted from newest to oldest.
+    pub optimizations: Vec<Optimization>,
     /// Estimation of pending optimizations.
     pub pending: PendingOptimizations,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct Optimization {
+    pub status: TrackerStatus,
+    pub progress: ProgressTree,
 }
 
 /// Estimation of pending optimizations
