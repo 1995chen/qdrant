@@ -106,15 +106,43 @@ class Result:
 
 # --- Transfer Operations ---
 
-def create_collection(uri: str, dims: int = 768, shards: int = 3, rf: int = 2):
+def create_collection(uri: str, dims: int = 768, shards: int = 3, rf: int = 2, on_disk: bool = True):
+    """Create a collection for benchmarking.
+
+    Args:
+        on_disk: If True, vectors are stored on disk (required for io_uring).
+                 This uses ChunkedMmap initially, which becomes Mmap after optimization.
+    """
     requests.delete(f"{uri}/collections/{COLLECTION}?timeout=60")
     r = requests.put(f"{uri}/collections/{COLLECTION}?timeout=60", json={
-        "vectors": {"size": dims, "distance": "Cosine"},
+        "vectors": {"size": dims, "distance": "Cosine", "on_disk": on_disk},
         "shard_number": shards,
         "replication_factor": rf,
-        "optimizers_config": {"indexing_threshold": 0},
+        # indexing_threshold=0 disables HNSW indexing (faster upsert)
+        # memmap_threshold=10000 (10MB) triggers conversion to Mmap storage (enables io_uring)
+        "optimizers_config": {"indexing_threshold": 0, "memmap_threshold": 10000},
     })
     assert_http_ok(r)
+
+
+def wait_for_optimization(uri: str, timeout: int = 120):
+    """Wait for segment optimization to complete (green status)."""
+    print("  Waiting for optimization...", end='', flush=True)
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            r = requests.get(f"{uri}/collections/{COLLECTION}", timeout=5)
+            if r.ok:
+                status = r.json().get('result', {}).get('status')
+                if status == 'green':
+                    print(f" done ({time.time() - start:.1f}s)")
+                    return True
+        except:
+            pass
+        time.sleep(1)
+        print(".", end='', flush=True)
+    print(f" timeout after {timeout}s")
+    return False
 
 
 def upsert_points(uri: str, num: int, dims: int = 768, batch: int = 1000):

@@ -118,7 +118,8 @@ def get_qdrant_exec() -> str:
     if is_coverage_mode():
         qdrant_exec = PROJECT_ROOT / "target" / "llvm-cov-target" / "debug" / "qdrant"
     else:
-        qdrant_exec = PROJECT_ROOT / "target" / "debug" / "qdrant"
+        # qdrant_exec = PROJECT_ROOT / "target" / "debug" / "qdrant"
+        qdrant_exec = PROJECT_ROOT / "target" / "perf" / "qdrant"
     return str(qdrant_exec)
 
 def get_llvm_profile_file() -> str:

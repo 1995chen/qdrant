@@ -32,7 +32,7 @@ from consensus_tests.utils import (
 )
 
 from benchmark import (
-    Result, create_collection, upsert_points, run_transfer, cleanup_replica, drop_caches
+    Result, create_collection, upsert_points, run_transfer, cleanup_replica, drop_caches, wait_for_optimization
 )
 
 # --- Constants ---
@@ -41,7 +41,7 @@ from benchmark import (
 SETTLE_TIME_S = 2
 
 
-def restart_cluster(peer_dirs: List[Path], port_seed: int, memory_limit: str = None, log_prefix: str = ""):
+def restart_cluster(peer_dirs: List[Path], port_seed: int, memory_limit: str = None, log_prefix: str = "", extra_env: dict = None):
     """Restart cluster using existing peer directories and same ports (preserves data and cluster state)."""
     import requests
 
@@ -50,7 +50,7 @@ def restart_cluster(peer_dirs: List[Path], port_seed: int, memory_limit: str = N
     # Start first peer with same port as original
     api_uri, bootstrap_uri = start_first_peer(
         peer_dirs[0], f"{log_prefix}peer_0_0.log",
-        port=port_seed, memory_limit=memory_limit
+        port=port_seed, extra_env=extra_env, memory_limit=memory_limit
     )
     peer_api_uris.append(api_uri)
 
@@ -59,13 +59,13 @@ def restart_cluster(peer_dirs: List[Path], port_seed: int, memory_limit: str = N
         port = port_seed + i * 100
         api_uri = start_peer(
             peer_dirs[i], f"{log_prefix}peer_0_{i}.log",
-            bootstrap_uri, port=port, memory_limit=memory_limit
+            bootstrap_uri, port=port, extra_env=extra_env, memory_limit=memory_limit
         )
         peer_api_uris.append(api_uri)
 
     # Wait for all peers to be responsive and cluster to have a leader
     # Use longer timeout since recovery with dm-delay can be slow (especially 20ms+ latency)
-    timeout = 300  # 5 minutes
+    timeout = 600  # 10 minutes
     start = time.time()
     while time.time() - start < timeout:
         all_ready = True
@@ -235,7 +235,8 @@ def run_single_config(
     dims: int,
     runs: int,
     memory_limit: str = None,
-    force_cold: bool = False
+    force_cold: bool = False,
+    async_scorer: bool = False
 ) -> Optional[Result]:
     """
     Run benchmark for a single latency configuration.
@@ -276,8 +277,19 @@ def run_single_config(
         'write_delay_ms': write_ms,
         'points': points,
         'force_cold': force_cold,
-        'memory_limit': memory_limit
+        'memory_limit': memory_limit,
+        'async_scorer': async_scorer
     })
+
+    # Setup extra environment
+    extra_env = {
+        # Increase max request size to 256MB for large vector tests
+        "QDRANT__SERVICE__MAX_REQUEST_SIZE_MB": "256",
+    }
+    if async_scorer:
+        extra_env["QDRANT__STORAGE__PERFORMANCE__ASYNC_SCORER"] = "true"
+        # Enable debug logging for io_uring verification
+        extra_env["RUST_LOG"] = "segment=debug,qdrant=info"
 
     uris = None
     dirs = None
@@ -289,16 +301,36 @@ def run_single_config(
             if i == 0:
                 # First run: create cluster and data
                 print(f"    Starting cluster on delayed storage (ports from {port_seed})...")
-                uris, dirs, _ = start_cluster(cluster_dir, num_peers=2, port_seed=port_seed, memory_limit=memory_limit)
+                uris, dirs, _ = start_cluster(cluster_dir, num_peers=2, port_seed=port_seed, extra_env=extra_env or None, memory_limit=memory_limit)
                 print(f"      Peer 0: {uris[0]}")
                 print(f"      Peer 1: {uris[1]}")
 
                 create_collection(uris[0], dims)
                 upsert_points(uris[0], points, dims)
-                # Drop caches AFTER upsert to ensure data must be read from disk
-                print(f"    Dropping caches after data creation...")
-                drop_caches(dirs[0] / "storage" / "collections")
-                time.sleep(SETTLE_TIME_S)
+
+                # Wait for optimization to complete (converts segments to Mmap storage with io_uring)
+                wait_for_optimization(uris[0])
+
+                # For fair comparison with cold restarts, also restart cluster after data creation
+                if force_cold:
+                    print(f"    Stopping cluster after data creation for true cold start...")
+                    kill_all_processes()
+                    time.sleep(SETTLE_TIME_S)
+
+                    # Drop caches while no process has files mapped
+                    print(f"    Dropping caches...")
+                    drop_caches(cluster_dir, verbose=True)
+
+                    print(f"    Restarting cluster (ports from {port_seed})...")
+                    uris, dirs, _ = restart_cluster(dirs, port_seed=port_seed, memory_limit=memory_limit, log_prefix="run0_", extra_env=extra_env or None)
+                    print(f"      Peer 0: {uris[0]}")
+                    print(f"      Peer 1: {uris[1]}")
+                    time.sleep(SETTLE_TIME_S)
+                else:
+                    # Drop caches AFTER upsert to ensure data must be read from disk
+                    print(f"    Dropping caches after data creation...")
+                    drop_caches(dirs[0] / "storage" / "collections")
+                    time.sleep(SETTLE_TIME_S)
 
             elif force_cold:
                 # Cold restart: stop cluster, drop caches, restart with existing data
@@ -310,7 +342,7 @@ def run_single_config(
                 drop_caches(cluster_dir, verbose=True)
 
                 print(f"    Restarting cluster (ports from {port_seed})...")
-                uris, dirs, _ = restart_cluster(dirs, port_seed=port_seed, memory_limit=memory_limit, log_prefix=f"run{i}_")
+                uris, dirs, _ = restart_cluster(dirs, port_seed=port_seed, memory_limit=memory_limit, log_prefix=f"run{i}_", extra_env=extra_env or None)
                 print(f"      Peer 0: {uris[0]}")
                 print(f"      Peer 1: {uris[1]}")
                 time.sleep(SETTLE_TIME_S)
@@ -348,7 +380,8 @@ def run_dm_delay(
     runs: int,
     latencies: List[Tuple[int, int]] = None,
     memory_limit: str = None,
-    force_cold: bool = False
+    force_cold: bool = False,
+    async_scorer: bool = False
 ) -> Result:
     """
     Test transfer throughput with various disk latencies using dm-delay.
@@ -361,6 +394,7 @@ def run_dm_delay(
         memory_limit: Memory limit for each Qdrant peer (e.g., '512M', '1G')
                       Forces page cache eviction for realistic disk I/O
         force_cold: Restart Qdrant between each run to guarantee cold cache
+        async_scorer: Enable io_uring async scorer for batched vector reads
     """
     if latencies is None:
         latencies = [
@@ -391,7 +425,7 @@ def run_dm_delay(
     all_results = []
     try:
         for read_ms, write_ms in latencies:
-            result = run_single_config(dm, read_ms, write_ms, points, dims, runs, memory_limit, force_cold)
+            result = run_single_config(dm, read_ms, write_ms, points, dims, runs, memory_limit, force_cold, async_scorer)
             if result:
                 all_results.append(result)
     except KeyboardInterrupt:
@@ -476,6 +510,9 @@ Prerequisites:
     parser.add_argument('--force-cold', action='store_true',
                         help="Restart Qdrant between each run to guarantee cold cache. "
                              "Without this, only run 1 per config is truly cold.")
+    parser.add_argument('--async-scorer', '--io-uring', action='store_true',
+                        help="Enable io_uring async scorer for batched vector reads (Linux only). "
+                             "This is what PR #7928 adds for concurrent disk I/O.")
     args = parser.parse_args()
 
     # Parse latencies
@@ -487,7 +524,7 @@ Prerequisites:
             latencies.append((int(read_ms), int(write_ms)))
 
     # Run benchmark
-    result = run_dm_delay(args.points, args.dims, args.runs, latencies, args.memory_limit, args.force_cold)
+    result = run_dm_delay(args.points, args.dims, args.runs, latencies, args.memory_limit, args.force_cold, args.async_scorer)
 
     # Save results
     args.output.mkdir(parents=True, exist_ok=True)
