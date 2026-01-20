@@ -118,14 +118,12 @@ def create_collection(uri: str, dims: int = 768, shards: int = 3, rf: int = 2, o
         "vectors": {"size": dims, "distance": "Cosine", "on_disk": on_disk},
         "shard_number": shards,
         "replication_factor": rf,
-        # indexing_threshold=0 disables HNSW indexing (faster upsert)
-        # memmap_threshold=10000 (10MB) triggers conversion to Mmap storage (enables io_uring)
-        "optimizers_config": {"indexing_threshold": 0, "memmap_threshold": 10000},
+        "optimizers_config": {"indexing_threshold": 1},
     })
     assert_http_ok(r)
 
 
-def wait_for_optimization(uri: str, timeout: int = 120):
+def wait_for_optimization(uri: str, timeout: int = 3600):
     """Wait for segment optimization to complete (green status)."""
     print("  Waiting for optimization...", end='', flush=True)
     start = time.time()

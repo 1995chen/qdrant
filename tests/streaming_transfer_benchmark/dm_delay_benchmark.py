@@ -32,8 +32,92 @@ from consensus_tests.utils import (
 )
 
 from benchmark import (
-    Result, create_collection, upsert_points, run_transfer, cleanup_replica, drop_caches, wait_for_optimization
+    Result, create_collection, upsert_points, run_transfer, cleanup_replica, drop_caches, wait_for_optimization, COLLECTION
 )
+
+import requests
+
+
+# --- Segment Storage Info ---
+
+def get_segment_storage_info(uri: str) -> dict:
+    """
+    Get detailed segment storage type info from telemetry.
+
+    Returns dict with segment storage types and counts.
+    """
+    try:
+        r = requests.get(f"{uri}/telemetry?details_level=6", timeout=10)
+        if not r.ok:
+            return {"error": f"HTTP {r.status_code}"}
+
+        telemetry = r.json().get('result', {})
+        collections_telemetry = telemetry.get('collections', {})
+
+        # Find our collection
+        for coll in collections_telemetry.get('collections', []):
+            if coll.get('id') == COLLECTION:
+                # Extract segment configs from shards[].local.segments[]
+                segments = []
+                for shard in coll.get('shards', []):
+                    local = shard.get('local', {})
+                    for seg in local.get('segments', []):
+                        config = seg.get('config', {})
+                        vector_data = config.get('vector_data', {})
+                        for vec_name, vec_config in vector_data.items():
+                            storage_type = vec_config.get('storage_type', 'unknown')
+                            segments.append({
+                                'vector_name': vec_name,
+                                'storage_type': storage_type,
+                                'index': vec_config.get('index', {}).get('type', 'unknown'),
+                            })
+
+                # Count storage types
+                storage_types = {}
+                for seg in segments:
+                    st = seg['storage_type']
+                    storage_types[st] = storage_types.get(st, 0) + 1
+
+                return {
+                    'segment_count': len(segments),
+                    'storage_types': storage_types,
+                    'segments': segments,
+                }
+
+        return {"error": "collection not found"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def wait_for_mmap_segments(uri: str, timeout: int = 120) -> bool:
+    """
+    Wait for segments to be optimized with Mmap storage type.
+
+    Mmap storage (not ChunkedMmap) is required for io_uring to work.
+    Allows 1 ChunkedMmap segment since Qdrant always keeps one appendable segment for writes.
+    Returns True if at least one Mmap segment exists and at most 1 ChunkedMmap, False if timeout.
+    """
+    print("  Waiting for Mmap segments...", end='', flush=True)
+    start = time.time()
+
+    while time.time() - start < timeout:
+        info = get_segment_storage_info(uri)
+        storage_types = info.get('storage_types', {})
+
+        # Count appendable segments - Qdrant always keeps 1 for writes
+        chunked_count = storage_types.get('ChunkedMmap', 0) + storage_types.get('InRamChunkedMmap', 0)
+        has_mmap = 'Mmap' in storage_types
+
+        # Allow up to 1 ChunkedMmap segment (required for writes)
+        if has_mmap and chunked_count <= 1:
+            print(f" done ({time.time() - start:.1f}s) - storage: {storage_types}")
+            return True
+
+        time.sleep(2)
+        print(".", end='', flush=True)
+
+    print(f" timeout after {timeout}s - storage: {storage_types}")
+    return False
 
 # --- Constants ---
 
@@ -310,6 +394,17 @@ def run_single_config(
 
                 # Wait for optimization to complete (converts segments to Mmap storage with io_uring)
                 wait_for_optimization(uris[0])
+
+                # Wait for segments to be converted to Mmap storage (required for io_uring)
+                if async_scorer:
+                    if not wait_for_mmap_segments(uris[0], timeout=180):
+                        print("  WARNING: Segments still using ChunkedMmap!")
+                        print("  io_uring will NOT be active (it requires Mmap storage)")
+                        seg_info = get_segment_storage_info(uris[0])
+                        print(f"  Current storage types: {seg_info.get('storage_types', {})}")
+                    else:
+                        seg_info = get_segment_storage_info(uris[0])
+                        print(f"  Segment storage info: {seg_info.get('storage_types', {})}")
 
                 # For fair comparison with cold restarts, also restart cluster after data creation
                 if force_cold:
