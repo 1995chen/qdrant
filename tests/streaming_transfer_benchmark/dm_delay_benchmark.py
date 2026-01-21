@@ -89,27 +89,28 @@ def get_segment_storage_info(uri: str) -> dict:
         return {"error": str(e)}
 
 
-def wait_for_mmap_segments(uri: str, timeout: int = 120) -> bool:
+def wait_for_mmap_segments(uri: str, timeout: int = 180) -> bool:
     """
     Wait for segments to be optimized with Mmap storage type.
 
     Mmap storage (not ChunkedMmap) is required for io_uring to work.
-    Allows 1 ChunkedMmap segment since Qdrant always keeps one appendable segment for writes.
-    Returns True if at least one Mmap segment exists and at most 1 ChunkedMmap, False if timeout.
+    In multi-node clusters, each node keeps one appendable ChunkedMmap segment.
+    Returns True if at least one Mmap segment exists and Mmap count >= ChunkedMmap count.
     """
     print("  Waiting for Mmap segments...", end='', flush=True)
     start = time.time()
+    storage_types = {}
 
     while time.time() - start < timeout:
         info = get_segment_storage_info(uri)
         storage_types = info.get('storage_types', {})
 
-        # Count appendable segments - Qdrant always keeps 1 for writes
+        mmap_count = storage_types.get('Mmap', 0)
         chunked_count = storage_types.get('ChunkedMmap', 0) + storage_types.get('InRamChunkedMmap', 0)
-        has_mmap = 'Mmap' in storage_types
 
-        # Allow up to 1 ChunkedMmap segment (required for writes)
-        if has_mmap and chunked_count <= 1:
+        # In multi-node clusters, each node has 1 ChunkedMmap for writes
+        # Check that we have at least as many Mmap segments as ChunkedMmap
+        if mmap_count > 0 and mmap_count >= chunked_count:
             print(f" done ({time.time() - start:.1f}s) - storage: {storage_types}")
             return True
 
@@ -397,7 +398,7 @@ def run_single_config(
 
                 # Wait for segments to be converted to Mmap storage (required for io_uring)
                 if async_scorer:
-                    if not wait_for_mmap_segments(uris[0], timeout=180):
+                    if not wait_for_mmap_segments(uris[0]):
                         print("  WARNING: Segments still using ChunkedMmap!")
                         print("  io_uring will NOT be active (it requires Mmap storage)")
                         seg_info = get_segment_storage_info(uris[0])
