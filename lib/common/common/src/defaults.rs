@@ -17,7 +17,10 @@ pub static APP_USER_AGENT: LazyLock<String> =
     LazyLock::new(|| format!("Qdrant/{QDRANT_VERSION_STRING}"));
 
 /// Maximum number of segments to load concurrently when loading a collection.
-pub const MAX_CONCURRENT_SEGMENT_LOADS: usize = 8;
+///
+/// Dynamic based on CPU size, with a minimum of 8.
+pub static MAX_CONCURRENT_SEGMENT_LOADS: LazyLock<usize> =
+    LazyLock::new(|| cpu::get_num_cpus().max(8));
 
 /// Number of retries for confirming a consensus operation.
 pub const CONSENSUS_CONFIRM_RETRIES: usize = 3;

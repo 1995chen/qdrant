@@ -397,7 +397,7 @@ impl LocalShard {
                 });
                 AbortOnDropHandle::new(handle)
             })
-            .buffer_unordered(MAX_CONCURRENT_SEGMENT_LOADS);
+            .buffer_unordered(*MAX_CONCURRENT_SEGMENT_LOADS);
 
         let mut segment_holder = SegmentHolder::default();
 
