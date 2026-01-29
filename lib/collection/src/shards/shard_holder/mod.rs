@@ -11,7 +11,7 @@ use std::time::Duration;
 use ahash::AHashMap;
 use api::rest::ShardKeyWithFallback;
 use common::budget::ResourceBudget;
-use common::defaults::MAX_CONCURRENT_SHARD_LOADS;
+use common::defaults::max_concurrent_shard_loads;
 use common::save_on_disk::SaveOnDisk;
 use common::tar_ext::BuilderExt;
 use fs_err as fs;
@@ -928,7 +928,7 @@ impl ShardHolder {
             }
         });
         let mut shard_stream =
-            stream::iter(shard_futures).buffer_unordered(*MAX_CONCURRENT_SHARD_LOADS);
+            stream::iter(shard_futures).buffer_unordered(max_concurrent_shard_loads());
         while let Some((replica_set, shard_key)) = shard_stream.next().await {
             // Change local shards stuck in Initializing state to Active
             let local_peer_id = replica_set.this_peer_id();
