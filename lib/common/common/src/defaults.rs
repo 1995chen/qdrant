@@ -32,7 +32,7 @@ pub fn set_max_concurrent_shard_loads(val: Option<usize>) {
             }
         }
         _ => {
-            log::warn!("invalid max_concurrent_shard_loads value: {:?}", val);
+            log::warn!("invalid max_concurrent_shard_loads value: {val:?}");
         }
     }
 }
@@ -47,7 +47,7 @@ pub fn set_max_concurrent_segment_loads(val: Option<usize>) {
             }
         }
         _ => {
-            log::warn!("invalid max_concurrent_segment_loads value: {:?}", val);
+            log::warn!("invalid max_concurrent_segment_loads value: {val:?}");
         }
     }
 }
