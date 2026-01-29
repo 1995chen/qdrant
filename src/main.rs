@@ -179,14 +179,9 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or_default(),
     );
     // set max concurrent for shard load
-    if let Some(val) = settings.storage.performance.max_concurrent_shard_loads {
-        set_max_concurrent_shard_loads(val);
-    }
+    set_max_concurrent_shard_loads(settings.storage.performance.max_concurrent_shard_loads);
     // set max concurrent for segment load
-    if let Some(val) = settings.storage.performance.max_concurrent_segment_loads {
-        set_max_concurrent_segment_loads(val);
-    }
-
+    set_max_concurrent_segment_loads(settings.storage.performance.max_concurrent_segment_loads);
     welcome(&settings);
 
     #[cfg(feature = "gpu")]

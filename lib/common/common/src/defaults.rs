@@ -22,18 +22,54 @@ static MAX_CONCURRENT_SHARD_LOADS_CELL: OnceLock<usize> = OnceLock::new();
 /// Maximum number of segments to load concurrently when loading a shard.
 static MAX_CONCURRENT_SEGMENT_LOADS_CELL: OnceLock<usize> = OnceLock::new();
 
-pub fn set_max_concurrent_shard_loads(val: usize) {
-    let _ = MAX_CONCURRENT_SHARD_LOADS_CELL.set(val);
+/// Sets the concurrency level for loading shards.
+/// This method is called when `config.storage.performance.max_concurrent_shard_loads` is set.
+pub fn set_max_concurrent_shard_loads(val: Option<usize>) {
+    match val {
+        Some(v) if v > 0 => {
+            if MAX_CONCURRENT_SHARD_LOADS_CELL.set(v).is_err() {
+                log::warn!("max_concurrent_shard_loads has already been set");
+            }
+        }
+        _ => {
+            log::warn!("invalid max_concurrent_shard_loads value: {:?}", val);
+        }
+    }
 }
 
-pub fn set_max_concurrent_segment_loads(val: usize) {
-    let _ = MAX_CONCURRENT_SEGMENT_LOADS_CELL.set(val);
+/// Sets the concurrency level for loading segments.
+/// This method is called when `config.storage.performance.max_concurrent_segment_loads` is set.
+pub fn set_max_concurrent_segment_loads(val: Option<usize>) {
+    match val {
+        Some(v) if v > 0 => {
+            if MAX_CONCURRENT_SEGMENT_LOADS_CELL.set(v).is_err() {
+                log::warn!("max_concurrent_segment_loads has already been set");
+            }
+        }
+        _ => {
+            log::warn!("invalid max_concurrent_segment_loads value: {:?}", val);
+        }
+    }
 }
 
+/// Returns the maximum number of shards allowed to be loaded concurrently.
+///
+/// If not explicitly set via [`set_max_concurrent_shard_loads`],
+/// this function returns the default value of 4.
+///
+/// # Returns
+/// The current maximum number of concurrent shard loads.
 pub fn max_concurrent_shard_loads() -> usize {
     *MAX_CONCURRENT_SHARD_LOADS_CELL.get().unwrap_or(&4)
 }
 
+/// Returns the maximum number of segments allowed to be loaded concurrently.
+///
+/// If not explicitly set via [`set_max_concurrent_segment_loads`],
+/// this function returns the default value of 8.
+///
+/// # Returns
+/// The current maximum number of concurrent segment loads.
 pub fn max_concurrent_segment_loads() -> usize {
     *MAX_CONCURRENT_SEGMENT_LOADS_CELL.get().unwrap_or(&8)
 }
