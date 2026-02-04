@@ -34,6 +34,8 @@ pub struct PerformanceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_rate_limit: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_collection_loads: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_shard_loads: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_segment_loads: Option<usize>,
