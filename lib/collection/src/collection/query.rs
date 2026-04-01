@@ -424,6 +424,7 @@ impl Collection {
             | Some(ScoringQuery::Vector(_))
             | Some(ScoringQuery::OrderBy(_))
             | Some(ScoringQuery::Formula(_))
+            | Some(ScoringQuery::Bm25(_))
             | Some(ScoringQuery::Sample(_)) => {
                 // Otherwise, it will be a list with a single list of scored points.
                 debug_assert_eq!(intermediates.len(), 1);
@@ -737,6 +738,7 @@ fn intermediate_query_infos(request: &ShardQueryRequest) -> Vec<IntermediateQuer
         | Some(ScoringQuery::Vector(_))
         | Some(ScoringQuery::OrderBy(_))
         | Some(ScoringQuery::Formula(_))
+        | Some(ScoringQuery::Bm25(_))
         | Some(ScoringQuery::Sample(_)) => {
             // Otherwise, we expect the root result
             vec![IntermediateQueryInfo {

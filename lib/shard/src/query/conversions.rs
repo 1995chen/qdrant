@@ -377,6 +377,19 @@ impl ScoringQuery {
                     candidates_limit: candidates_limit as usize,
                 })
             }
+            grpc::query_shard_points::query::Score::Bm25(grpc::Bm25Internal {
+                field,
+                query,
+                k1,
+                b,
+            }) => ScoringQuery::Bm25(crate::query::Bm25Internal {
+                field: field
+                    .parse()
+                    .map_err(|_| tonic::Status::invalid_argument("invalid BM25 field path"))?,
+                query,
+                k1: OrderedFloat(k1),
+                b: OrderedFloat(b),
+            }),
         };
 
         Ok(scoring_query)
@@ -411,6 +424,14 @@ impl From<ScoringQuery> for grpc::query_shard_points::Query {
                     vector: Some(grpc::RawVector::from(vector)),
                     lambda: lambda.into_inner(),
                     candidates_limit: candidates_limit as u32,
+                })),
+            },
+            ScoringQuery::Bm25(crate::query::Bm25Internal { field, query, k1, b }) => Self {
+                score: Some(Score::Bm25(grpc::Bm25Internal {
+                    field: field.to_string(),
+                    query,
+                    k1: k1.into_inner(),
+                    b: b.into_inner(),
                 })),
             },
         }

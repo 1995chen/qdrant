@@ -5,7 +5,16 @@ use common::counter::hardware_accumulator::HwMeasurementAcc;
 use common::save_on_disk::SaveOnDisk;
 use segment::common::reciprocal_rank_fusion::DEFAULT_RRF_K;
 use segment::data_types::vectors::{DEFAULT_VECTOR_NAME, NamedQuery, VectorInternal};
-use segment::types::{PointIdType, WithPayloadInterface, WithVector};
+use segment::data_types::vectors::VectorStructInternal;
+use segment::json_path::JsonPath;
+use segment::types::{
+    PayloadFieldSchema, PayloadSchemaType, PointIdType, WithPayloadInterface, WithVector,
+};
+use shard::operations::point_ops::{
+    PointInsertOperationsInternal, PointOperations, PointStructPersisted,
+};
+use shard::operations::{CollectionUpdateOperations, CreateIndex, FieldIndexOperations};
+use shard::query::Bm25Internal;
 use shard::query::query_enum::QueryEnum;
 use tempfile::Builder;
 use tokio::runtime::Handle;
@@ -18,6 +27,64 @@ use crate::operations::universal_query::shard_query::{
 use crate::shards::local_shard::LocalShard;
 use crate::shards::shard_trait::{ShardOperation, WaitUntil};
 use crate::tests::fixtures::*;
+
+async fn create_text_index(shard: &LocalShard, field_name: &str) {
+    let create_index = CollectionUpdateOperations::FieldIndexOperation(
+        FieldIndexOperations::CreateIndex(CreateIndex {
+            field_name: field_name.parse().unwrap(),
+            field_schema: Some(PayloadFieldSchema::FieldType(PayloadSchemaType::Text)),
+        }),
+    );
+
+    shard
+        .update(
+            create_index.into(),
+            WaitUntil::Visible,
+            None,
+            HwMeasurementAcc::new(),
+        )
+        .await
+        .unwrap();
+}
+
+fn bm25_upsert_operation() -> CollectionUpdateOperations {
+    let points = vec![
+        PointStructPersisted {
+            id: 1.into(),
+            vector: VectorStructInternal::from(vec![1.0, 0.0, 0.0, 0.0]).into(),
+            payload: Some(
+                serde_json::from_value(serde_json::json!({
+                    "content": "apple apple banana"
+                }))
+                .unwrap(),
+            ),
+        },
+        PointStructPersisted {
+            id: 2.into(),
+            vector: VectorStructInternal::from(vec![0.0, 1.0, 0.0, 0.0]).into(),
+            payload: Some(
+                serde_json::from_value(serde_json::json!({
+                    "content": "apple banana"
+                }))
+                .unwrap(),
+            ),
+        },
+        PointStructPersisted {
+            id: 3.into(),
+            vector: VectorStructInternal::from(vec![0.0, 0.0, 1.0, 0.0]).into(),
+            payload: Some(
+                serde_json::from_value(serde_json::json!({
+                    "content": "banana banana"
+                }))
+                .unwrap(),
+            ),
+        },
+    ];
+
+    CollectionUpdateOperations::PointOperation(PointOperations::UpsertPoints(
+        PointInsertOperationsInternal::PointsList(points),
+    ))
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_shard_query_rrf_rescoring() {
@@ -370,6 +437,79 @@ async fn test_shard_query_vector_rescoring() {
     // merging taking place
     // number of results is limited by the outer limit for vector rescoring
     assert_eq!(sources_scores[0].len(), outer_limit);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_shard_query_bm25_rescoring() {
+    let collection_dir = Builder::new().prefix("test_collection").tempdir().unwrap();
+
+    let config = create_collection_config();
+    let collection_name = "test".to_string();
+    let current_runtime: Handle = Handle::current();
+
+    let payload_index_schema_dir = Builder::new().prefix("qdrant-test").tempdir().unwrap();
+    let payload_index_schema_file = payload_index_schema_dir.path().join("payload-schema.json");
+    let payload_index_schema =
+        Arc::new(SaveOnDisk::load_or_init_default(payload_index_schema_file).unwrap());
+
+    let shard = LocalShard::build(
+        0,
+        collection_name,
+        collection_dir.path(),
+        Arc::new(RwLock::new(config.clone())),
+        Arc::new(Default::default()),
+        payload_index_schema,
+        current_runtime.clone(),
+        current_runtime.clone(),
+        ResourceBudget::default(),
+        config.optimizer_config.clone(),
+    )
+    .await
+    .unwrap();
+
+    shard
+        .update(
+            bm25_upsert_operation().into(),
+            WaitUntil::Visible,
+            None,
+            HwMeasurementAcc::new(),
+        )
+        .await
+        .unwrap();
+
+    create_text_index(&shard, "content").await;
+
+    let query = ShardQueryRequest {
+        prefetches: vec![],
+        query: Some(ScoringQuery::Bm25(Bm25Internal {
+            field: JsonPath::new("content"),
+            query: "apple".to_string(),
+            k1: 1.2.into(),
+            b: 0.75.into(),
+        })),
+        filter: None,
+        score_threshold: None,
+        limit: 3,
+        offset: 0,
+        params: None,
+        with_vector: WithVector::Bool(false),
+        with_payload: WithPayloadInterface::Bool(false),
+    };
+
+    let hw_acc = HwMeasurementAcc::new();
+    let response = shard
+        .query_batch(Arc::new(vec![query]), &current_runtime, None, hw_acc)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+
+    assert_eq!(response.len(), 1);
+    let points = &response[0];
+    assert_eq!(points.len(), 2);
+    assert_eq!(points[0].id, PointIdType::NumId(1));
+    assert_eq!(points[1].id, PointIdType::NumId(2));
+    assert!(points[0].score > points[1].score);
 }
 
 #[tokio::test(flavor = "multi_thread")]

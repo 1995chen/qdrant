@@ -137,6 +137,7 @@ impl PlannedQuery {
             | Some(ScoringQuery::Fusion(_))
             | Some(ScoringQuery::OrderBy(_))
             | Some(ScoringQuery::Formula(_))
+            | Some(ScoringQuery::Bm25(_))
             | Some(ScoringQuery::Sample(_)) => with_vector,
             Some(ScoringQuery::Mmr(mmr)) => with_vector.merge(&WithVector::from(mmr.using.clone())),
         };
@@ -186,6 +187,12 @@ impl PlannedQuery {
             Some(ScoringQuery::Fusion(_)) => None, // Expect fusion to have prefetches
             Some(ScoringQuery::OrderBy(_)) => None,
             Some(ScoringQuery::Formula(_)) => None,
+            Some(ScoringQuery::Bm25(_)) => Some(RescoreStages::shard_level(RescoreParams {
+                rescore: query.clone().unwrap(),
+                limit,
+                score_threshold: score_threshold.map(OrderedFloat),
+                params,
+            })),
             Some(ScoringQuery::Sample(_)) => None,
             Some(ScoringQuery::Mmr(_)) => Some(RescoreStages::collection_level(RescoreParams {
                 rescore: query.clone().unwrap(),
@@ -196,15 +203,19 @@ impl PlannedQuery {
         };
 
         // Everything must come from a single source.
-        let sources = vec![leaf_source_from_scoring_query(
-            &mut self.searches,
-            &mut self.scrolls,
-            query,
-            limit,
-            params,
-            score_threshold,
-            filter,
-        )?];
+        let sources = if matches!(query, Some(ScoringQuery::Bm25(_))) {
+            Vec::new()
+        } else {
+            vec![leaf_source_from_scoring_query(
+                &mut self.searches,
+                &mut self.scrolls,
+                query,
+                limit,
+                params,
+                score_threshold,
+                filter,
+            )?]
+        };
 
         // Root-level query without prefetches means we won't do any extra rescoring
         let merge_plan = MergePlan::new(sources, rescore_stages)?;
@@ -269,6 +280,7 @@ impl PlannedQuery {
             rescore @ (ScoringQuery::Vector(_)
             | ScoringQuery::OrderBy(_)
             | ScoringQuery::Formula(_)
+            | ScoringQuery::Bm25(_)
             | ScoringQuery::Sample(_)) => Some(RescoreStages::shard_level(RescoreParams {
                 rescore,
                 limit,
@@ -416,6 +428,11 @@ fn leaf_source_from_scoring_query(
         Some(ScoringQuery::Formula(_)) => {
             return Err(OperationError::validation_error(
                 "cannot apply Formula without prefetches".to_string(),
+            ));
+        }
+        Some(ScoringQuery::Bm25(_)) => {
+            return Err(OperationError::validation_error(
+                "cannot apply BM25 as a leaf query without rescoring".to_string(),
             ));
         }
         Some(ScoringQuery::Sample(SampleInternal::Random)) => {

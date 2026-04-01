@@ -583,6 +583,19 @@ impl StructPayloadIndex {
             })
     }
 
+    pub fn get_full_text_index(
+        &self,
+        key: &JsonPath,
+    ) -> OperationResult<&crate::index::field_index::full_text_index::text_index::FullTextIndex>
+    {
+        self.field_indexes
+            .get(key)
+            .and_then(|indexes| indexes.iter().find_map(FieldIndex::as_full_text))
+            .ok_or_else(|| OperationError::service_error(format!(
+                "Missing full-text index for field `{key}`"
+            )))
+    }
+
     pub fn populate(&self) -> OperationResult<()> {
         for (_, field_indexes) in self.field_indexes.iter() {
             for index in field_indexes {

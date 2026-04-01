@@ -88,4 +88,8 @@ impl ImmutableFullTextIndex {
             },
         }
     }
+
+    pub fn total_tokens_count(&self) -> usize {
+        self.inverted_index.total_tokens_count
+    }
 }

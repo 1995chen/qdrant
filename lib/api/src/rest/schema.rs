@@ -646,6 +646,9 @@ pub enum Query {
     /// Score boosting via an arbitrary formula
     Formula(FormulaQuery),
 
+    /// Score points with BM25 over a full-text payload index.
+    Bm25(Bm25Query),
+
     /// Sample points from the collection, non-deterministically.
     Sample(SampleQuery),
 
@@ -714,6 +717,33 @@ pub struct FormulaQuery {
 
     #[serde(default)]
     pub defaults: HashMap<String, Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(rename_all = "snake_case")]
+pub struct Bm25Query {
+    /// Payload field that has a text index.
+    pub field: JsonPath,
+
+    /// Query text to score against the indexed field.
+    #[validate(length(min = 1))]
+    pub query: String,
+
+    /// BM25 hyperparameters. Solr/Lucene-compatible defaults are used if omitted.
+    #[validate(nested)]
+    pub params: Option<Bm25Params>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Validate, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct Bm25Params {
+    /// BM25 `k1` parameter. Default is 1.2.
+    #[validate(range(min = 0.0))]
+    pub k1: Option<f32>,
+
+    /// BM25 `b` parameter. Default is 0.75.
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub b: Option<f32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Validate)]

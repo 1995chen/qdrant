@@ -149,6 +149,44 @@ impl ReadSegmentEntry for ProxySegment {
         Ok(result)
     }
 
+    fn search_bm25(
+        &self,
+        field: &JsonPath,
+        query: &str,
+        filter: Option<&Filter>,
+        top: usize,
+        score_threshold: Option<f32>,
+        with_payload: &WithPayload,
+        with_vector: &WithVector,
+        hw_counter: &HardwareCounterCell,
+        is_stopped: &AtomicBool,
+        k1: f32,
+        b: f32,
+    ) -> OperationResult<Vec<ScoredPoint>> {
+        let wrapped_filter = if self.deleted_points.is_empty() {
+            filter.cloned()
+        } else {
+            Some(Self::add_deleted_points_condition_to_filter(
+                filter,
+                self.deleted_points.keys().copied(),
+            ))
+        };
+
+        self.wrapped_segment.get().read().search_bm25(
+            field,
+            query,
+            wrapped_filter.as_ref(),
+            top,
+            score_threshold,
+            with_payload,
+            with_vector,
+            hw_counter,
+            is_stopped,
+            k1,
+            b,
+        )
+    }
+
     fn vector(
         &self,
         vector_name: &VectorName,

@@ -19,7 +19,7 @@ use shard::query::query_enum::QueryEnum;
 
 use super::formula::FormulaInternal;
 use super::shard_query::{
-    FusionInternal, SampleInternal, ScoringQuery, ShardPrefetch, ShardQueryRequest,
+    Bm25Internal, FusionInternal, SampleInternal, ScoringQuery, ShardPrefetch, ShardQueryRequest,
 };
 use crate::common::fetch_vectors::ReferencedVectors;
 use crate::lookup::WithLookup;
@@ -100,6 +100,9 @@ pub enum Query {
     /// Score boosting via an arbitrary formula
     Formula(FormulaInternal),
 
+    /// Score points with BM25 over a full-text payload index.
+    Bm25(Bm25QueryInternal),
+
     /// Sample points
     Sample(SampleInternal),
 }
@@ -125,6 +128,7 @@ impl Query {
             Query::Fusion(fusion) => ScoringQuery::Fusion(fusion),
             Query::OrderBy(order_by) => ScoringQuery::OrderBy(order_by),
             Query::Formula(formula) => ScoringQuery::Formula(ParsedFormula::try_from(formula)?),
+            Query::Bm25(bm25) => ScoringQuery::Bm25(Bm25Internal::from(bm25)),
             Query::Sample(sample) => ScoringQuery::Sample(sample),
         };
 
@@ -138,7 +142,30 @@ impl Query {
                 .into_iter()
                 .copied()
                 .collect(),
-            Self::Fusion(_) | Self::OrderBy(_) | Self::Formula(_) | Self::Sample(_) => Vec::new(),
+            Self::Fusion(_)
+            | Self::OrderBy(_)
+            | Self::Formula(_)
+            | Self::Bm25(_)
+            | Self::Sample(_) => Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Bm25QueryInternal {
+    pub field: JsonPath,
+    pub query: String,
+    pub k1: Option<f32>,
+    pub b: Option<f32>,
+}
+
+impl From<Bm25QueryInternal> for Bm25Internal {
+    fn from(value: Bm25QueryInternal) -> Self {
+        Self {
+            field: value.field,
+            query: value.query,
+            k1: OrderedFloat(value.k1.unwrap_or(1.2)),
+            b: OrderedFloat(value.b.unwrap_or(0.75)),
         }
     }
 }

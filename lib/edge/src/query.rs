@@ -252,6 +252,10 @@ impl EdgeShard {
                 hw_counter_acc,
             ),
 
+            ScoringQuery::Bm25(_bm25) => Err(OperationError::service_error(
+                "BM25 queries are not supported in the edge query runtime",
+            )),
+
             ScoringQuery::Sample(sample) => match sample {
                 SampleInternal::Random => {
                     // create single scroll request for rescoring query

@@ -251,6 +251,7 @@ impl FromPyObject<'_, '_> for PyScoringQuery {
                 ScoringQuery::Fusion(_) => {}
                 ScoringQuery::OrderBy(_) => {}
                 ScoringQuery::Formula(_) => {}
+                ScoringQuery::Bm25(_) => {}
                 ScoringQuery::Sample(_) => {}
                 ScoringQuery::Mmr(_) => {}
             }
@@ -280,6 +281,9 @@ impl<'py> IntoPyObject<'py> for PyScoringQuery {
             ScoringQuery::Fusion(fusion) => PyFusion::from(fusion).into_bound_py_any(py),
             ScoringQuery::OrderBy(order_by) => PyOrderBy(order_by).into_bound_py_any(py),
             ScoringQuery::Formula(formula) => PyFormula(formula).into_bound_py_any(py),
+            ScoringQuery::Bm25(_bm25) => Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "BM25 queries are not yet exposed in the Python edge bindings",
+            )),
             ScoringQuery::Sample(sample) => PySample::from(sample).into_bound_py_any(py),
             ScoringQuery::Mmr(mmr) => PyMmr(mmr).into_bound_py_any(py),
         }
@@ -303,6 +307,7 @@ impl Repr for PyScoringQuery {
             ScoringQuery::Fusion(fusion) => PyFusion::from(fusion.clone()).fmt(f),
             ScoringQuery::OrderBy(order_by) => PyOrderBy::wrap_ref(order_by).fmt(f),
             ScoringQuery::Formula(_formula) => f.unimplemented(), // TODO!
+            ScoringQuery::Bm25(_bm25) => f.unimplemented(),
             ScoringQuery::Sample(sample) => PySample::from(*sample).fmt(f),
             ScoringQuery::Mmr(mmr) => PyMmr::wrap_ref(mmr).fmt(f),
         }

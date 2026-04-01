@@ -66,6 +66,7 @@ fn validate_query(query: &ScoringQuery, sources: &[Source]) -> OperationResult<(
         ScoringQuery::Fusion(fusion) => validate_fusion(fusion, sources.len()),
         ScoringQuery::OrderBy(_) => Ok(()),
         ScoringQuery::Formula(_) => Ok(()),
+        ScoringQuery::Bm25(_) => Ok(()),
         ScoringQuery::Sample(_) => Ok(()),
         ScoringQuery::Mmr(_) => Ok(()),
     }

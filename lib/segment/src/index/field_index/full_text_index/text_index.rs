@@ -98,6 +98,10 @@ impl FullTextIndex {
         }
     }
 
+    pub fn indexed_points_count(&self) -> usize {
+        self.points_count()
+    }
+
     pub(super) fn get_token(
         &self,
         token: &str,
@@ -107,6 +111,22 @@ impl FullTextIndex {
             Self::Mutable(index) => index.inverted_index.get_token_id(token, hw_counter),
             Self::Immutable(index) => index.inverted_index.get_token_id(token, hw_counter),
             Self::Mmap(index) => index.inverted_index.get_token_id(token, hw_counter),
+        }
+    }
+
+    pub fn token_id(&self, token: &str, hw_counter: &HardwareCounterCell) -> Option<TokenId> {
+        self.get_token(token, hw_counter)
+    }
+
+    pub fn get_posting_len(
+        &self,
+        token_id: TokenId,
+        hw_counter: &HardwareCounterCell,
+    ) -> Option<usize> {
+        match self {
+            Self::Mutable(index) => index.inverted_index.get_posting_len(token_id, hw_counter),
+            Self::Immutable(index) => index.inverted_index.get_posting_len(token_id, hw_counter),
+            Self::Mmap(index) => index.inverted_index.get_posting_len(token_id, hw_counter),
         }
     }
 
@@ -129,6 +149,14 @@ impl FullTextIndex {
                 Storage::Mmap(mmap_index) => &mmap_index.tokenizer,
             },
             Self::Mmap(index) => &index.tokenizer,
+        }
+    }
+
+    pub fn values_total_count(&self) -> usize {
+        match self {
+            Self::Mutable(index) => index.inverted_index.total_tokens_count(),
+            Self::Immutable(index) => index.total_tokens_count(),
+            Self::Mmap(index) => index.total_tokens_count(),
         }
     }
 
@@ -177,6 +205,14 @@ impl FullTextIndex {
             Self::Immutable(index) => index.inverted_index.values_count(point_id),
             Self::Mmap(index) => index.inverted_index.values_count(point_id),
         }
+    }
+
+    pub fn average_len(&self) -> f32 {
+        let points_count = self.points_count();
+        if points_count == 0 {
+            return 0.0;
+        }
+        self.values_total_count() as f32 / points_count as f32
     }
 
     pub fn values_is_empty(&self, point_id: PointOffsetType) -> bool {
@@ -265,6 +301,36 @@ impl FullTextIndex {
         });
         let tokens = tokens.into_iter().collect::<TokenSet>();
         Some(ParsedQuery::AnyTokens(tokens))
+    }
+
+    pub fn parse_bm25_query(
+        &self,
+        text: &str,
+        hw_counter: &HardwareCounterCell,
+    ) -> Option<Vec<TokenId>> {
+        let ParsedQuery::AnyTokens(tokens) = self.parse_text_any_query(text, hw_counter)? else {
+            return None;
+        };
+        Some(tokens.inner())
+    }
+
+    pub fn bm25_candidates<'a>(
+        &'a self,
+        text: &str,
+        hw_counter: &'a HardwareCounterCell,
+    ) -> Box<dyn Iterator<Item = PointOffsetType> + 'a> {
+        let Some(parsed_query) = self.parse_text_any_query(text, hw_counter) else {
+            return Box::new(std::iter::empty());
+        };
+        self.filter_query(parsed_query, hw_counter)
+    }
+
+    pub fn tokenize_document_text<'a>(
+        &'a self,
+        value: &'a str,
+        mut f: impl FnMut(Cow<'a, str>),
+    ) {
+        self.get_tokenizer().tokenize_doc(value, |token| f(token));
     }
 
     pub fn parse_tokenset(&self, text: &str, hw_counter: &HardwareCounterCell) -> TokenSet {

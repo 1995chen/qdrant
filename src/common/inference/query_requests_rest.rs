@@ -4,6 +4,7 @@ use collection::lookup::WithLookup;
 use collection::operations::universal_query::collection_query::{
     CollectionPrefetch, CollectionQueryGroupsRequest, CollectionQueryRequest, FeedbackInternal,
     FeedbackStrategy, Mmr, NearestWithMmr, Query, VectorInputInternal, VectorQuery,
+    Bm25QueryInternal,
 };
 use collection::operations::universal_query::formula::FormulaInternal;
 use collection::operations::universal_query::shard_query::{FusionInternal, SampleInternal};
@@ -272,6 +273,12 @@ fn convert_query_with_inferred(
         rest::Query::Fusion(fusion) => Ok(Query::Fusion(FusionInternal::from(fusion.fusion))),
         rest::Query::Rrf(rrf) => Ok(Query::Fusion(FusionInternal::from(rrf.rrf))),
         rest::Query::Formula(formula) => Ok(Query::Formula(FormulaInternal::from(formula))),
+        rest::Query::Bm25(bm25) => Ok(Query::Bm25(Bm25QueryInternal {
+            field: bm25.field,
+            query: bm25.query,
+            k1: bm25.params.as_ref().and_then(|p| p.k1),
+            b: bm25.params.as_ref().and_then(|p| p.b),
+        })),
         rest::Query::Sample(sample) => Ok(Query::Sample(SampleInternal::from(sample.sample))),
         rest::Query::RelevanceFeedback(relevance_feedback) => {
             let rest::RelevanceFeedbackInput {
@@ -357,7 +364,9 @@ fn context_pair_from_rest_with_inferred(
 mod tests {
     use std::collections::HashMap;
 
-    use api::rest::schema::{Document, Image, InferenceObject, NearestQuery};
+    use api::rest::schema::{
+        Bm25Params, Bm25Query, Document, Image, InferenceObject, NearestQuery,
+    };
     use collection::operations::point_ops::VectorPersisted;
     use serde_json::json;
 
@@ -488,6 +497,30 @@ mod tests {
                 _ => panic!("Expected dense vector"),
             },
             _ => panic!("Expected nearest query"),
+        }
+    }
+
+    #[test]
+    fn test_convert_query_with_inferred_bm25() {
+        let inferred = create_test_inferred_batch();
+        let query = rest::QueryInterface::Query(rest::Query::Bm25(Bm25Query {
+            field: "content".parse().unwrap(),
+            query: "quick brown fox".to_string(),
+            params: Some(Bm25Params {
+                k1: Some(1.5),
+                b: Some(0.6),
+            }),
+        }));
+
+        let result = convert_query_with_inferred(query, &inferred).unwrap();
+        match result {
+            Query::Bm25(bm25) => {
+                assert_eq!(bm25.field, "content".parse().unwrap());
+                assert_eq!(bm25.query, "quick brown fox");
+                assert_eq!(bm25.k1, Some(1.5));
+                assert_eq!(bm25.b, Some(0.6));
+            }
+            _ => panic!("Expected BM25 query"),
         }
     }
 }

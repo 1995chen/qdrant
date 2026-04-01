@@ -363,6 +363,13 @@ message MmrInternal {
   uint32 candidates_limit = 3;
 }
 
+message Bm25Internal {
+  string field = 1;
+  string query = 2;
+  float k1 = 3;
+  float b = 4;
+}
+
 message QueryShardPoints {
   message Query {
     oneof score {
@@ -380,6 +387,8 @@ message QueryShardPoints {
       MmrInternal mmr = 6;
       // Parameterized RRF fusion
       Rrf rrf = 7;
+      // Full-text BM25 scoring
+      Bm25Internal bm25 = 8;
     }
   }
 

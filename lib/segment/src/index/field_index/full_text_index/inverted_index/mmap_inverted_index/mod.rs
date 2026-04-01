@@ -41,6 +41,7 @@ pub struct MmapInvertedIndex {
     pub(in crate::index::field_index::full_text_index) storage: Storage,
     /// Number of points which are not deleted
     pub(in crate::index::field_index::full_text_index) active_points_count: usize,
+    pub(in crate::index::field_index::full_text_index) total_tokens_count: usize,
     is_on_disk: bool,
 }
 
@@ -59,6 +60,7 @@ impl MmapInvertedIndex {
             vocab,
             point_to_tokens_count,
             points_count: _,
+            total_tokens_count: _,
         } = inverted_index;
 
         debug_assert_eq!(vocab.len(), postings.len());
@@ -153,6 +155,7 @@ impl MmapInvertedIndex {
         )?;
         let num_deleted_points = deleted.count_ones()?;
         let deleted_points = MmapBitSliceBufferedUpdateWrapper::new(deleted);
+        let total_tokens_count: usize = point_to_tokens_count.iter().sum();
         let points_count = point_to_tokens_count.len() - num_deleted_points;
 
         Ok(Some(Self {
@@ -164,6 +167,7 @@ impl MmapInvertedIndex {
                 deleted_points,
             },
             active_points_count: points_count,
+            total_tokens_count,
             is_on_disk: !populate,
         }))
     }
@@ -442,6 +446,7 @@ impl InvertedIndex for MmapInvertedIndex {
 
         self.storage.deleted_points.set(idx as usize, true);
         if let Some(count) = self.storage.point_to_tokens_count.get_mut(idx as usize) {
+            self.total_tokens_count = self.total_tokens_count.saturating_sub(*count);
             *count = 0;
 
             // `deleted_points`'s length can be larger than `point_to_tokens_count`'s length.

@@ -16,6 +16,7 @@ use ordered_float::OrderedFloat;
 use segment::data_types::order_by::OrderBy;
 use segment::data_types::vectors::VectorInternal;
 use segment::index::query_optimization::rescore_formula::parsed_formula::ParsedFormula;
+use segment::json_path::JsonPath;
 use segment::types::*;
 use serde::Serialize;
 
@@ -122,6 +123,9 @@ pub enum ScoringQuery {
     /// Score boosting via an arbitrary formula
     Formula(ParsedFormula),
 
+    /// Score points with BM25 over a full-text payload index.
+    Bm25(Bm25Internal),
+
     /// Sample points
     Sample(SampleInternal),
 
@@ -150,7 +154,11 @@ impl ScoringQuery {
             },
             // MMR is a nearest neighbors search before computing diversity at collection level
             Self::Mmr(_) => false,
-            Self::Vector(_) | Self::OrderBy(_) | Self::Formula(_) | Self::Sample(_) => false,
+            Self::Vector(_)
+            | Self::OrderBy(_)
+            | Self::Formula(_)
+            | Self::Bm25(_)
+            | Self::Sample(_) => false,
         }
     }
 
@@ -159,9 +167,21 @@ impl ScoringQuery {
         match self {
             Self::Vector(query) => Some(query.get_vector_name()),
             Self::Mmr(mmr) => Some(&mmr.using),
-            _ => None,
+            Self::Fusion(_)
+            | Self::OrderBy(_)
+            | Self::Formula(_)
+            | Self::Bm25(_)
+            | Self::Sample(_) => None,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Hash, Serialize)]
+pub struct Bm25Internal {
+    pub field: JsonPath,
+    pub query: String,
+    pub k1: OrderedFloat<f32>,
+    pub b: OrderedFloat<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Hash, Serialize)]

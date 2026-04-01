@@ -78,6 +78,10 @@ impl MmapFullTextIndex {
         self.inverted_index.is_on_disk()
     }
 
+    pub fn total_tokens_count(&self) -> usize {
+        self.inverted_index.total_tokens_count
+    }
+
     /// Populate all pages in the mmap.
     /// Block until all pages are populated.
     pub fn populate(&self) -> OperationResult<()> {
@@ -152,6 +156,7 @@ impl ValueIndexer for FullTextMmapIndexBuilder {
 
         let token_set = TokenSet::from_iter(tokens);
         self.mutable_index.index_tokens(id, token_set, hw_counter)?;
+        self.mutable_index.set_point_tokens_count(id, str_tokens.len());
 
         Ok(())
     }

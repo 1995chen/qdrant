@@ -1,3 +1,4 @@
+mod bm25_search;
 mod entry;
 mod facet;
 mod formula_rescore;

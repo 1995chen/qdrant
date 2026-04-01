@@ -1,8 +1,10 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use ahash::AHashMap;
+use common::counter::hardware_counter::HardwareCounterCell;
 use common::counter::hardware_accumulator::HwMeasurementAcc;
 use common::types::{DeferredBehavior, ScoreType};
 use futures::stream::FuturesUnordered;
@@ -21,6 +23,7 @@ use shard::common::stopping_guard::StoppingGuard;
 use shard::optimizers::config::DEFAULT_INDEXING_THRESHOLD_KB;
 use shard::query::query_context::{fill_query_context, init_query_context};
 use shard::query::query_enum::QueryEnum;
+use shard::query::Bm25Internal;
 use shard::retrieve::record_internal::RecordInternal;
 use shard::retrieve::retrieve_blocking::retrieve_blocking;
 use shard::search::CoreSearchRequestBatch;
@@ -51,6 +54,76 @@ type SegmentSearchExecutedResult = CollectionResult<(SegmentBatchSearchResult, V
 pub struct SegmentsSearcher;
 
 impl SegmentsSearcher {
+    pub async fn search_bm25(
+        segments: LockedSegmentHolder,
+        query: &Bm25Internal,
+        filter: Option<&Filter>,
+        limit: usize,
+        score_threshold: Option<f32>,
+        with_payload: &WithPayload,
+        with_vector: &WithVector,
+        search_runtime_handle: &Handle,
+        timeout: Duration,
+        hw_measurement_acc: HwMeasurementAcc,
+    ) -> CollectionResult<Vec<ScoredPoint>> {
+        let segments: Vec<_> = {
+            let Some(segments_lock) = segments.try_read_for(timeout) else {
+                return Err(CollectionError::timeout(timeout, "bm25 search"));
+            };
+            segments_lock
+                .non_appendable_then_appendable_segments()
+                .collect()
+        };
+
+        let searches = segments
+            .into_iter()
+            .map(|segment| {
+                let query = query.clone();
+                let filter = filter.cloned();
+                let with_payload = with_payload.clone();
+                let with_vector = with_vector.clone();
+                let hw_measurement_acc = hw_measurement_acc.clone();
+                search_runtime_handle.spawn_blocking(move || {
+                    let locked_segment = segment.get();
+                    let Some(read_segment) = locked_segment.try_read_for(timeout) else {
+                        return Err(CollectionError::timeout(timeout, "bm25 search"));
+                    };
+                    let hw_counter = HardwareCounterCell::new_with_accumulator(hw_measurement_acc);
+                    read_segment
+                        .search_bm25(
+                            &query.field,
+                            &query.query,
+                            filter.as_ref(),
+                            limit,
+                            score_threshold,
+                            &with_payload,
+                            &with_vector,
+                            &hw_counter,
+                            &AtomicBool::new(false),
+                            query.k1.into_inner(),
+                            query.b.into_inner(),
+                        )
+                        .map_err(CollectionError::from)
+                })
+            })
+            .collect_vec();
+
+        let mut results = Vec::new();
+        for search in searches {
+            results.push(search.await.map_err(CollectionError::from)??);
+        }
+
+        let mut aggregator = BatchResultAggregator::new(std::iter::once(limit));
+        aggregator.update_point_versions(results.iter().flatten());
+        aggregator.update_batch_results(0, results.into_iter().flatten());
+
+        aggregator
+            .into_topk()
+            .into_iter()
+            .next()
+            .ok_or_else(|| CollectionError::service_error("expected BM25 search result"))
+    }
+
     /// Execute searches in parallel and return results in the same order as the searches were provided
     async fn execute_searches(
         searches: Vec<AbortOnDropHandle<SegmentSearchExecutedResult>>,

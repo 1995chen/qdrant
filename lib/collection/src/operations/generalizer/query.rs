@@ -76,6 +76,7 @@ impl Generalizer for ScoringQuery {
             ScoringQuery::Fusion(_) => self.clone(),
             ScoringQuery::OrderBy(_) => self.clone(),
             ScoringQuery::Formula(_) => self.clone(),
+            ScoringQuery::Bm25(_) => self.clone(),
             ScoringQuery::Sample(_) => self.clone(),
             ScoringQuery::Mmr(mmr) => ScoringQuery::Mmr(mmr.remove_details()),
         }
