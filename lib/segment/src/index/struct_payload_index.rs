@@ -591,9 +591,9 @@ impl StructPayloadIndex {
         self.field_indexes
             .get(key)
             .and_then(|indexes| indexes.iter().find_map(FieldIndex::as_full_text))
-            .ok_or_else(|| OperationError::service_error(format!(
-                "Missing full-text index for field `{key}`"
-            )))
+            .ok_or_else(|| {
+                OperationError::service_error(format!("Missing full-text index for field `{key}`"))
+            })
     }
 
     pub fn populate(&self) -> OperationResult<()> {

@@ -325,11 +325,7 @@ impl FullTextIndex {
         self.filter_query(parsed_query, hw_counter)
     }
 
-    pub fn tokenize_document_text<'a>(
-        &'a self,
-        value: &'a str,
-        mut f: impl FnMut(Cow<'a, str>),
-    ) {
+    pub fn tokenize_document_text<'a>(&'a self, value: &'a str, mut f: impl FnMut(Cow<'a, str>)) {
         self.get_tokenizer().tokenize_doc(value, |token| f(token));
     }
 

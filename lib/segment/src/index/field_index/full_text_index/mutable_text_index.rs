@@ -184,7 +184,8 @@ impl MutableFullTextIndex {
         let token_set = TokenSet::from_iter(tokens);
         self.inverted_index
             .index_tokens(idx, token_set, hw_counter)?;
-        self.inverted_index.set_point_tokens_count(idx, str_tokens.len());
+        self.inverted_index
+            .set_point_tokens_count(idx, str_tokens.len());
 
         let tokens_to_store = if phrase_matching {
             // store ordered tokens

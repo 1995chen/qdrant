@@ -10,8 +10,7 @@ use crate::common::check_stopped;
 use crate::common::operation_error::OperationResult;
 use crate::json_path::JsonPath;
 use crate::payload_storage::FilterContext;
-use crate::types::Filter;
-use crate::types::PayloadContainer;
+use crate::types::{Filter, PayloadContainer};
 
 impl Segment {
     pub(super) fn do_search_bm25(
@@ -97,8 +96,11 @@ impl Segment {
             return Ok(0.0);
         }
 
-        let mut tf: HashMap<u32, usize> =
-            query_tokens.iter().copied().map(|token| (token, 0)).collect();
+        let mut tf: HashMap<u32, usize> = query_tokens
+            .iter()
+            .copied()
+            .map(|token| (token, 0))
+            .collect();
         let mut doc_len = 0usize;
 
         for value in values {
@@ -146,7 +148,9 @@ impl Segment {
                 continue;
             }
 
-            let doc_freq = text_index.get_posting_len(*token_id, hw_counter).unwrap_or(0) as f32;
+            let doc_freq = text_index
+                .get_posting_len(*token_id, hw_counter)
+                .unwrap_or(0) as f32;
             if doc_freq <= 0.0 {
                 continue;
             }

@@ -2,9 +2,9 @@ use api::rest::models::InferenceUsage;
 use api::rest::schema as rest;
 use collection::lookup::WithLookup;
 use collection::operations::universal_query::collection_query::{
-    CollectionPrefetch, CollectionQueryGroupsRequest, CollectionQueryRequest, FeedbackInternal,
-    FeedbackStrategy, Mmr, NearestWithMmr, Query, VectorInputInternal, VectorQuery,
-    Bm25QueryInternal,
+    Bm25QueryInternal, CollectionPrefetch, CollectionQueryGroupsRequest, CollectionQueryRequest,
+    FeedbackInternal, FeedbackStrategy, Mmr, NearestWithMmr, Query, VectorInputInternal,
+    VectorQuery,
 };
 use collection::operations::universal_query::formula::FormulaInternal;
 use collection::operations::universal_query::shard_query::{FusionInternal, SampleInternal};

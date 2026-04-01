@@ -156,7 +156,8 @@ impl ValueIndexer for FullTextMmapIndexBuilder {
 
         let token_set = TokenSet::from_iter(tokens);
         self.mutable_index.index_tokens(id, token_set, hw_counter)?;
-        self.mutable_index.set_point_tokens_count(id, str_tokens.len());
+        self.mutable_index
+            .set_point_tokens_count(id, str_tokens.len());
 
         Ok(())
     }

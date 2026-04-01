@@ -426,7 +426,12 @@ impl From<ScoringQuery> for grpc::query_shard_points::Query {
                     candidates_limit: candidates_limit as u32,
                 })),
             },
-            ScoringQuery::Bm25(crate::query::Bm25Internal { field, query, k1, b }) => Self {
+            ScoringQuery::Bm25(crate::query::Bm25Internal {
+                field,
+                query,
+                k1,
+                b,
+            }) => Self {
                 score: Some(Score::Bm25(grpc::Bm25Internal {
                     field: field.to_string(),
                     query,

@@ -4,8 +4,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use ahash::AHashMap;
-use common::counter::hardware_counter::HardwareCounterCell;
 use common::counter::hardware_accumulator::HwMeasurementAcc;
+use common::counter::hardware_counter::HardwareCounterCell;
 use common::types::{DeferredBehavior, ScoreType};
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, TryStreamExt};
@@ -21,9 +21,9 @@ use segment::types::{
 };
 use shard::common::stopping_guard::StoppingGuard;
 use shard::optimizers::config::DEFAULT_INDEXING_THRESHOLD_KB;
+use shard::query::Bm25Internal;
 use shard::query::query_context::{fill_query_context, init_query_context};
 use shard::query::query_enum::QueryEnum;
-use shard::query::Bm25Internal;
 use shard::retrieve::record_internal::RecordInternal;
 use shard::retrieve::retrieve_blocking::retrieve_blocking;
 use shard::search::CoreSearchRequestBatch;
