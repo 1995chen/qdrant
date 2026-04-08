@@ -18,6 +18,8 @@ testing = ["common/testing"]
 cc = { workspace = true }
 
 [dependencies]
+arrow-array = "56.2.0"
+arrow-ipc = "56.2.0"
 fs-err = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
