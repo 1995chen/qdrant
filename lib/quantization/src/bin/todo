@@ -6,6 +6,6 @@ cargo run --release -p quantization --bin turboquant_bench -- \
   --bits 3 \
   --query-offset 2000
 
-
-
+cargo test -p quantization turboquant::math -- --nocapture
+cargo +nightly fmt --all
 seed 42

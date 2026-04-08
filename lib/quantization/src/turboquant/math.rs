@@ -118,3 +118,170 @@ pub fn gaussian_conditional_expectation(sigma: f64, a: f64, b: f64) -> f64 {
 
     sigma * (normal_pdf(a_std) - normal_pdf(b_std)) / probability
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{gaussian_conditional_expectation, inverse_normal_cdf, normal_cdf};
+
+    #[test]
+    fn normal_cdf_is_symmetric_and_monotonic() {
+        let xs = [-6.0, -4.0, -2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 4.0, 6.0];
+
+        for pair in xs.windows(2) {
+            assert!(
+                normal_cdf(pair[0]) < normal_cdf(pair[1]),
+                "normal_cdf should be strictly increasing: x0={}, x1={}",
+                pair[0],
+                pair[1]
+            );
+        }
+
+        let tol = 2e-7;
+        for x in xs {
+            let lhs = normal_cdf(-x);
+            let rhs = 1.0 - normal_cdf(x);
+            assert!(
+                (lhs - rhs).abs() <= tol,
+                "symmetry mismatch at x={x}: lhs={lhs}, rhs={rhs}"
+            );
+        }
+    }
+
+    #[test]
+    fn inverse_normal_cdf_is_monotonic_and_roundtrips_cdf() {
+        let ps = [
+            1e-9, 1e-6, 1e-4, 1e-3, 1e-2, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99,
+        ];
+
+        for pair in ps.windows(2) {
+            assert!(
+                inverse_normal_cdf(pair[0]) < inverse_normal_cdf(pair[1]),
+                "inverse_normal_cdf should be strictly increasing: p0={}, p1={}",
+                pair[0],
+                pair[1]
+            );
+        }
+
+        let tol = 2e-7;
+        for p in ps {
+            let reconstructed = normal_cdf(inverse_normal_cdf(p));
+            assert!(
+                (reconstructed - p).abs() <= tol,
+                "roundtrip mismatch at p={p}: reconstructed={reconstructed}"
+            );
+        }
+    }
+
+    #[test]
+    fn inverse_normal_cdf_matches_known_quantiles_and_endpoints() {
+        let known_quantiles = [
+            (0.5, 0.0),
+            (0.15865525393145707, -1.0),
+            (0.8413447460685429, 1.0),
+            (0.022750131948179195, -2.0),
+            (0.9772498680518208, 2.0),
+            (0.0013498980316300933, -3.0),
+            (0.9986501019683699, 3.0),
+        ];
+
+        let tol = 5e-7;
+        for (p, expected_z) in known_quantiles {
+            let actual_z = inverse_normal_cdf(p);
+            assert!(
+                (actual_z - expected_z).abs() <= tol,
+                "quantile mismatch at p={p}: expected {expected_z}, got {actual_z}"
+            );
+        }
+
+        assert_eq!(inverse_normal_cdf(0.0), f64::NEG_INFINITY);
+        assert_eq!(inverse_normal_cdf(1.0), f64::INFINITY);
+    }
+
+    #[test]
+    fn gaussian_conditional_expectation_stays_within_bounds() {
+        let finite_cases = [
+            (1.0, -1.0, 1.0),
+            (0.3, -0.2, 0.4),
+            (0.2, -0.5, -0.1),
+            (0.4, 0.1, 0.6),
+        ];
+
+        for (sigma, a, b) in finite_cases {
+            let value = gaussian_conditional_expectation(sigma, a, b);
+            assert!(
+                value >= a && value <= b,
+                "expected value to stay in [{a}, {b}], got {value}"
+            );
+        }
+
+        let lower_tail = gaussian_conditional_expectation(0.3, f64::NEG_INFINITY, 0.2);
+        assert!(
+            lower_tail <= 0.2,
+            "expected lower-tail conditional mean <= upper bound, got {lower_tail}"
+        );
+
+        let upper_tail = gaussian_conditional_expectation(0.3, -0.2, f64::INFINITY);
+        assert!(
+            upper_tail >= -0.2,
+            "expected upper-tail conditional mean >= lower bound, got {upper_tail}"
+        );
+    }
+
+    #[test]
+    fn gaussian_conditional_expectation_is_zero_on_symmetric_intervals() {
+        let intervals = [(-3.0, 3.0), (-1.0, 1.0), (-0.5, 0.5)];
+        let sigmas = [0.1, 0.3, 1.0];
+
+        let tol = 1e-10;
+        for sigma in sigmas {
+            for (a_std, b_std) in intervals {
+                let a = a_std * sigma;
+                let b = b_std * sigma;
+                let value = gaussian_conditional_expectation(sigma, a, b);
+                assert!(
+                    value.abs() <= tol,
+                    "expected near-zero mean on symmetric interval [{a}, {b}], got {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gaussian_conditional_expectation_is_zero_for_full_distribution() {
+        let sigmas = [0.1, 0.3, 1.0, 10.0];
+
+        for sigma in sigmas {
+            let value = gaussian_conditional_expectation(sigma, f64::NEG_INFINITY, f64::INFINITY);
+            assert_eq!(
+                value, 0.0,
+                "expected zero mean for sigma={sigma}, got {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn gaussian_conditional_expectation_uses_stable_fallbacks_for_tiny_probabilities() {
+        let sigma = 1.0;
+
+        let degenerate = gaussian_conditional_expectation(sigma, 2.5, 2.5);
+        assert_eq!(degenerate, 2.5);
+
+        let tiny_interval = gaussian_conditional_expectation(sigma, 10.0, 10.0 + 1e-16);
+        assert_eq!(
+            tiny_interval, 10.0,
+            "expected midpoint fallback for tiny interval"
+        );
+
+        let upper_tail = gaussian_conditional_expectation(sigma, 10.0, f64::INFINITY);
+        assert_eq!(
+            upper_tail, 11.0,
+            "expected upper-tail fallback for tiny mass"
+        );
+
+        let lower_tail = gaussian_conditional_expectation(sigma, f64::NEG_INFINITY, -10.0);
+        assert_eq!(
+            lower_tail, -11.0,
+            "expected lower-tail fallback for tiny mass"
+        );
+    }
+}
