@@ -11,6 +11,20 @@
 
 use std::f64::consts::{PI, SQRT_2};
 
+use rand::RngExt;
+
+pub fn l2_norm(values: &[f32]) -> f32 {
+    values.iter().map(|&v| v * v).sum::<f32>().sqrt()
+}
+
+pub fn sample_standard_normal_pair(rng: &mut impl RngExt) -> (f32, f32) {
+    let u1 = (1.0f32 - rng.random::<f32>()).max(1e-12f32);
+    let u2 = rng.random::<f32>();
+    let radius = (-2.0f32 * u1.ln()).sqrt();
+    let theta = 2.0f32 * std::f32::consts::PI * u2;
+    (radius * theta.cos(), radius * theta.sin())
+}
+
 pub fn normal_pdf(x: f64) -> f64 {
     (-0.5 * x * x).exp() / (2.0 * PI).sqrt()
 }

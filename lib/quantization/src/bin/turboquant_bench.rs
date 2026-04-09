@@ -170,7 +170,8 @@ Options:
             &ks,
             variant.use_simd,
             &exact_baseline,
-        );
+        )
+        .map_err(|err| err.to_string())?;
         let total_elapsed = total_started.elapsed();
         print_variant_row(
             &variant.name,
@@ -179,7 +180,7 @@ Options:
             evaluation.elapsed,
             total_elapsed,
             dim,
-            if variant.config.qjl { dim } else { 0 },
+            if variant.config.qjl() { dim } else { 0 },
         );
     }
 
@@ -221,79 +222,42 @@ fn print_variant_row(
 fn build_variants(dim: usize, bits: u8, seed: u64) -> Vec<Variant> {
     let scalar = Variant {
         name: "scalar/Haar".into(),
-        config: TurboQuantConfig {
-            dim,
-            bit_width: bits,
-            rotation: RotationKind::Haar,
-            seed: seed,
-            qjl: false,
-            norm_correction: NormCorrection::Disabled,
-        },
+        config: TurboQuantConfig::new(dim, bits, seed),
         use_simd: false,
     };
 
     let qjl_dense = Variant {
         name: "qjl/Haar".into(),
-        config: TurboQuantConfig {
-            dim,
-            bit_width: bits,
-            rotation: RotationKind::Haar,
-            seed: seed,
-            qjl: true,
-            norm_correction: NormCorrection::Disabled,
-        },
+        config: TurboQuantConfig::new(dim, bits, seed).with_qjl(true),
         use_simd: false,
     };
 
     let qjl_norm_dense = Variant {
         name: "qjl+norm/Haar".into(),
-        config: TurboQuantConfig {
-            dim,
-            bit_width: bits,
-            rotation: RotationKind::Haar,
-            seed: seed,
-            qjl: true,
-            norm_correction: NormCorrection::Exact,
-        },
+        config: TurboQuantConfig::new(dim, bits, seed)
+            .with_qjl(true)
+            .with_norm_correction(NormCorrection::Exact),
         use_simd: false,
     };
 
     let qjl_norm_wht = Variant {
         name: "qjl+norm/Hadamard".into(),
-        config: TurboQuantConfig {
-            dim,
-            bit_width: bits,
-            rotation: RotationKind::Hadamard,
-            seed: seed,
-            qjl: true,
-            norm_correction: NormCorrection::Exact,
-        },
+        config: TurboQuantConfig::new(dim, bits, seed)
+            .with_rotation(RotationKind::Hadamard)
+            .with_qjl(true)
+            .with_norm_correction(NormCorrection::Exact),
         use_simd: false,
     };
 
     let norm = Variant {
         name: "norm/Haar".into(),
-        config: TurboQuantConfig {
-            dim,
-            bit_width: bits,
-            rotation: RotationKind::Haar,
-            seed: seed,
-            qjl: false,
-            norm_correction: NormCorrection::Exact,
-        },
+        config: TurboQuantConfig::new(dim, bits, seed).with_norm_correction(NormCorrection::Exact),
         use_simd: false,
     };
 
     let simd = Variant {
         name: "simd/Haar".into(),
-        config: TurboQuantConfig {
-            dim,
-            bit_width: bits,
-            rotation: RotationKind::Haar,
-            seed: seed,
-            qjl: false,
-            norm_correction: NormCorrection::Exact,
-        },
+        config: TurboQuantConfig::new(dim, bits, seed).with_norm_correction(NormCorrection::Exact),
         use_simd: true,
     };
 

@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use super::{TurboQuantCodec, TurboQuantVector};
+use crate::EncodingError;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RecallAtK {
@@ -87,7 +88,7 @@ pub fn evaluate_recall_with_baseline(
     ks: &[usize],
     use_simd: bool,
     baseline: &ExactSearchBaseline,
-) -> RecallEvaluation {
+) -> Result<RecallEvaluation, EncodingError> {
     assert!(
         ks.iter().copied().max().unwrap_or(0) <= baseline.max_k(),
         "baseline must be computed with max_k >= requested ks"
@@ -106,10 +107,10 @@ pub fn evaluate_recall_with_baseline(
                     codec.score_dot_simd(query, vector)
                 } else {
                     codec.score_dot_plain(query, vector)
-                };
-                (index, score)
+                }?;
+                Ok((index, score))
             })
-            .collect();
+            .collect::<Result<Vec<_>, EncodingError>>()?;
         approx_scores.sort_by(|lhs, rhs| rhs.1.total_cmp(&lhs.1));
 
         for &k in ks {
@@ -134,10 +135,10 @@ pub fn evaluate_recall_with_baseline(
             .collect(),
     };
 
-    RecallEvaluation {
+    Ok(RecallEvaluation {
         report,
         elapsed: started.elapsed(),
-    }
+    })
 }
 
 pub fn evaluate_recall(
@@ -147,9 +148,9 @@ pub fn evaluate_recall(
     queries: &[Vec<f32>],
     ks: &[usize],
     use_simd: bool,
-) -> RecallReport {
+) -> Result<RecallReport, EncodingError> {
     let baseline = compute_exact_baseline(original, queries, ks);
-    evaluate_recall_with_baseline(codec, encoded, queries, ks, use_simd, &baseline).report
+    Ok(evaluate_recall_with_baseline(codec, encoded, queries, ks, use_simd, &baseline)?.report)
 }
 
 fn dot(lhs: &[f32], rhs: &[f32]) -> f32 {

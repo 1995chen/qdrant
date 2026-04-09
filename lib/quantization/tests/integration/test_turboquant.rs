@@ -66,24 +66,28 @@ mod tests {
 
     #[test]
     fn turboquant_pack_unpack_roundtrip_for_three_bits() {
-        let config = TurboQuantConfig::baseline(64, 3, 7);
+        let config = TurboQuantConfig::new(64, 3, 7);
         let codec = TurboQuantCodec::new(config).unwrap();
 
         let vector: Vec<f32> = (0..64).map(|index| (index as f32 * 0.1).sin()).collect();
         let encoded = codec.quantize(&vector).unwrap();
-        let decoded = codec.dequantize(&encoded);
+        let decoded = codec.dequantize(&encoded).unwrap();
 
-        assert_eq!(encoded.packed_levels.len(), (64usize * 3usize).div_ceil(8));
+        assert_eq!(
+            encoded.packed_levels().len(),
+            (64usize * 3usize).div_ceil(8)
+        );
         assert_eq!(decoded.len(), 64);
     }
 
     #[test]
     fn baseline_turboquant_recall_is_reasonable() {
         let (dataset, queries) = synthetic_dataset(41, 768, 64, 64);
-        let codec = TurboQuantCodec::new(TurboQuantConfig::baseline(64, 3, 41)).unwrap();
+        let codec = TurboQuantCodec::new(TurboQuantConfig::new(64, 3, 41)).unwrap();
         let encoded = codec.quantize_batch(&dataset).unwrap();
 
-        let report = evaluate_recall(&codec, &encoded, &dataset, &queries, &[10, 100], false);
+        let report =
+            evaluate_recall(&codec, &encoded, &dataset, &queries, &[10, 100], false).unwrap();
 
         eprintln!("baseline report: {report:?}");
         assert!(report.recall(10).unwrap() > 0.82);
@@ -93,10 +97,11 @@ mod tests {
     #[test]
     fn qjl_variant_keeps_useful_recall() {
         let (dataset, queries) = synthetic_dataset(77, 768, 64, 64);
-        let codec = TurboQuantCodec::new(TurboQuantConfig::with_qjl(64, 3, 77)).unwrap();
+        let codec = TurboQuantCodec::new(TurboQuantConfig::new(64, 3, 77).with_qjl(true)).unwrap();
         let encoded = codec.quantize_batch(&dataset).unwrap();
 
-        let report = evaluate_recall(&codec, &encoded, &dataset, &queries, &[10, 100], false);
+        let report =
+            evaluate_recall(&codec, &encoded, &dataset, &queries, &[10, 100], false).unwrap();
 
         eprintln!("qjl report: {report:?}");
         assert!(report.recall(10).unwrap() > 0.74);
@@ -113,23 +118,10 @@ mod tests {
         for seed in [5_u64, 11, 19, 29] {
             let (dataset, queries) = synthetic_dataset(seed, 768, 64, 64);
 
-            let baseline = TurboQuantCodec::new(TurboQuantConfig {
-                dim: 64,
-                bit_width: 3,
-                rotation: RotationKind::Haar,
-                seed,
-                qjl: false,
-                norm_correction: NormCorrection::Disabled,
-            })
-            .unwrap();
-            let corrected = TurboQuantCodec::new(TurboQuantConfig {
-                dim: 64,
-                bit_width: 3,
-                rotation: RotationKind::Haar,
-                seed,
-                qjl: false,
-                norm_correction: NormCorrection::Exact,
-            })
+            let baseline = TurboQuantCodec::new(TurboQuantConfig::new(64, 3, seed)).unwrap();
+            let corrected = TurboQuantCodec::new(
+                TurboQuantConfig::new(64, 3, seed).with_norm_correction(NormCorrection::Exact),
+            )
             .unwrap();
 
             let baseline_encoded = baseline.quantize_batch(&dataset).unwrap();
@@ -142,7 +134,8 @@ mod tests {
                 &queries,
                 &[10, 100],
                 false,
-            );
+            )
+            .unwrap();
             let corrected_report = evaluate_recall(
                 &corrected,
                 &corrected_encoded,
@@ -150,7 +143,8 @@ mod tests {
                 &queries,
                 &[10, 100],
                 false,
-            );
+            )
+            .unwrap();
 
             baseline_r10 += baseline_report.recall(10).unwrap();
             corrected_r10 += corrected_report.recall(10).unwrap();
@@ -175,27 +169,26 @@ mod tests {
     #[test]
     fn simd_scores_match_plain_scores() {
         let (dataset, queries) = synthetic_dataset(123, 192, 8, 64);
-        let codec = TurboQuantCodec::new(TurboQuantConfig {
-            dim: 64,
-            bit_width: 4,
-            rotation: RotationKind::Hadamard,
-            seed: 123,
-            qjl: false,
-            norm_correction: NormCorrection::Exact,
-        })
+        let codec = TurboQuantCodec::new(
+            TurboQuantConfig::new(64, 4, 123)
+                .with_rotation(RotationKind::Hadamard)
+                .with_norm_correction(NormCorrection::Exact),
+        )
         .unwrap();
         let encoded = codec.quantize_batch(&dataset).unwrap();
 
         for query in &queries {
             for vector in &encoded {
-                let plain = codec.score_dot_plain(query, vector);
-                let simd = codec.score_dot_simd(query, vector);
+                let plain = codec.score_dot_plain(query, vector).unwrap();
+                let simd = codec.score_dot_simd(query, vector).unwrap();
                 assert!((plain - simd).abs() < 1e-4);
             }
         }
 
-        let plain_report = evaluate_recall(&codec, &encoded, &dataset, &queries, &[10, 100], false);
-        let simd_report = evaluate_recall(&codec, &encoded, &dataset, &queries, &[10, 100], true);
+        let plain_report =
+            evaluate_recall(&codec, &encoded, &dataset, &queries, &[10, 100], false).unwrap();
+        let simd_report =
+            evaluate_recall(&codec, &encoded, &dataset, &queries, &[10, 100], true).unwrap();
         assert_eq!(plain_report, simd_report);
     }
 }

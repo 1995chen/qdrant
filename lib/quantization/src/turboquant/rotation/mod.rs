@@ -10,7 +10,7 @@
 mod haar;
 mod hadamard;
 
-use self::haar::HarrRotation;
+use self::haar::HaarRotation;
 use self::hadamard::HadamardRotation;
 use crate::EncodingError;
 
@@ -22,28 +22,28 @@ pub enum RotationKind {
 
 #[derive(Clone)]
 pub enum Rotation {
-    Harr(HarrRotation),
+    Haar(HaarRotation),
     Hadamard(HadamardRotation),
 }
 
 impl Rotation {
     pub fn new(kind: RotationKind, dim: usize, seed: u64) -> Result<Self, EncodingError> {
         Ok(match kind {
-            RotationKind::Haar => Self::Harr(HarrRotation::new(dim, seed)),
+            RotationKind::Haar => Self::Haar(HaarRotation::new(dim, seed)),
             RotationKind::Hadamard => Self::Hadamard(HadamardRotation::new(dim, seed)),
         })
     }
 
     pub fn apply(&self, input: &[f32]) -> Vec<f32> {
         match self {
-            Self::Harr(rotation) => rotation.apply(input),
+            Self::Haar(rotation) => rotation.apply(input),
             Self::Hadamard(rotation) => rotation.apply(input),
         }
     }
 
     pub fn apply_transpose(&self, input: &[f32], scale: f32) -> Vec<f32> {
         match self {
-            Self::Harr(rotation) => rotation.apply_transpose(input, scale),
+            Self::Haar(rotation) => rotation.apply_transpose(input, scale),
             Self::Hadamard(rotation) => rotation.apply_transpose(input, scale),
         }
     }

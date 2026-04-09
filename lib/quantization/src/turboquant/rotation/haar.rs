@@ -1,19 +1,21 @@
+use rand::SeedableRng;
 use rand::rngs::StdRng;
-use rand::{RngExt, SeedableRng};
+
+use crate::turboquant::math;
 
 #[derive(Clone)]
-pub(crate) struct HarrRotation {
+pub(crate) struct HaarRotation {
     dim: usize,
     matrix: Vec<f32>,
 }
 
-impl HarrRotation {
+impl HaarRotation {
     pub(super) fn new(dim: usize, seed: u64) -> Self {
         let mut rng = StdRng::seed_from_u64(seed);
         let mut matrix = vec![0.0f32; dim * dim];
         let mut filled = 0usize;
         while filled < matrix.len() {
-            let (z0, z1) = Self::box_muller(&mut rng);
+            let (z0, z1) = math::sample_standard_normal_pair(&mut rng);
             matrix[filled] = z0;
             filled += 1;
             if filled < matrix.len() {
@@ -47,14 +49,6 @@ impl HarrRotation {
         }
 
         Self { dim, matrix }
-    }
-
-    fn box_muller(rng: &mut StdRng) -> (f32, f32) {
-        let u1 = (1.0f32 - rng.random::<f32>()).max(1e-12f32);
-        let u2 = rng.random::<f32>();
-        let radius = (-2.0f32 * u1.ln()).sqrt();
-        let theta = 2.0f32 * std::f32::consts::PI * u2;
-        (radius * theta.cos(), radius * theta.sin())
     }
 
     fn dot(lhs: &[f32], rhs: &[f32]) -> f32 {
