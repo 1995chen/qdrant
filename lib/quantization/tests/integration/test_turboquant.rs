@@ -194,8 +194,7 @@ mod tests {
             }
         }
 
-        let plain_report =
-            evaluate_recall(&codec, &encoded, &dataset, &queries, &[10, 100], false);
+        let plain_report = evaluate_recall(&codec, &encoded, &dataset, &queries, &[10, 100], false);
         let simd_report = evaluate_recall(&codec, &encoded, &dataset, &queries, &[10, 100], true);
         assert_eq!(plain_report, simd_report);
     }
