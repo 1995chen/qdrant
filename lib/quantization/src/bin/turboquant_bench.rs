@@ -7,6 +7,7 @@
 //! Example:
 //! `cargo run -p quantization --bin turboquant_bench -- --dataset-path ./dataset --vectors 2000 --queries 200 --bits 3`
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::fs::File;
 use std::io::BufReader;
@@ -15,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use arrow_array::{Array, Float32Array, Float64Array, GenericListArray, OffsetSizeTrait};
 use arrow_ipc::reader::{FileReader, StreamReader};
+use quantization::EncodingError;
 use quantization::turboquant::{
-    NormCorrection, RecallReport, TurboQuantCodec, TurboQuantConfig, compute_exact_baseline,
-    evaluate_recall_with_baseline,
+    NormCorrection, TurboQuantCodec, TurboQuantConfig, TurboQuantVector, simd,
 };
 
 #[derive(Debug, Clone)]
@@ -80,148 +81,37 @@ struct Variant {
     use_simd: bool,
 }
 
-fn main() {
-    if let Err(error) = run() {
-        eprintln!("turboquant_bench error: {error}");
-        std::process::exit(1);
-    }
-}
-
-fn run() -> Result<(), String> {
-    let args = Args::parse(std::env::args().skip(1))?;
-    if args.help {
-        println!(
-            "Usage:
-  cargo run -p quantization --bin turboquant_bench -- [options]
-
-Options:
-  --dataset-path <path>    Hugging Face Arrow cache directory or one `.arrow` shard
-  --dataset-column <name>  Embedding column to read. Default: openai
-  --vectors <usize>     Database vector count. Default: 2000
-  --queries <usize>     Query count. Default: 200
-  --bits <u8>           Scalar quantization bits. Default: 3
-  --query-offset <usize>
-                        Query slice start row inside the dataset. Default: same as --vectors
-  -h, --help            Show this help"
-        );
-        return Ok(());
-    }
-
-    let dataset_path = args
-        .dataset_path
-        .as_ref()
-        .ok_or_else(|| "--dataset-path is required".to_owned())?
-        .clone();
-    let (dataset, queries, dim) = load_arrow_dataset(
-        &dataset_path,
-        args.dataset_column,
-        args.vectors,
-        args.queries,
-        args.query_offset.unwrap_or(args.vectors),
-    )?;
-    let ks = [10, 100];
-    let seed = 42;
-    let variants = build_variants(dim, args.bits, 42);
-    let exact_baseline = compute_exact_baseline(&dataset, &queries, &ks);
-
-    println!(
-        "TurboQuant benchmark\n  dim={} vectors={} queries={} bits={} seed={} source={}\n",
-        dim,
-        args.vectors,
-        args.queries,
-        args.bits,
-        seed,
-        dataset_path.display()
-    );
-    println!(
-        "{:<24} {:>10} {:>10} {:>11} {:>11} {:>11} {:>12} {:>12}",
-        "variant",
-        "recall@10",
-        "recall@100",
-        "encode_ms",
-        "search_ms",
-        "total_ms",
-        "dim",
-        "qjl_bits"
-    );
-    println!("{}", "-".repeat(108));
-    print_variant_row(
-        "exact/f32",
-        &exact_baseline.report,
-        None,
-        exact_baseline.elapsed,
-        exact_baseline.elapsed,
-        dim,
-        0,
-    );
-
-    for variant in variants {
-        let total_started = Instant::now();
-        let codec = TurboQuantCodec::new(variant.config.clone()).map_err(|err| err.to_string())?;
-        let encode_started = Instant::now();
-        let encoded = codec
-            .quantize_batch(&dataset)
-            .map_err(|err| err.to_string())?;
-        let encode_elapsed = encode_started.elapsed();
-        let evaluation = evaluate_recall_with_baseline(
-            &codec,
-            &encoded,
-            &queries,
-            &ks,
-            variant.use_simd,
-            &exact_baseline,
-        )
-        .map_err(|err| err.to_string())?;
-        let total_elapsed = total_started.elapsed();
-        print_variant_row(
-            &variant.name,
-            &evaluation.report,
-            Some(encode_elapsed),
-            evaluation.elapsed,
-            total_elapsed,
-            dim,
-            if variant.config.qjl() { dim } else { 0 },
-        );
-    }
-
-    Ok(())
-}
-
 fn duration_ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
-fn print_variant_row(
-    name: &str,
-    report: &RecallReport,
-    encode_elapsed: Option<Duration>,
-    search_elapsed: Duration,
-    total_elapsed: Duration,
-    dim: usize,
-    qjl_bits: usize,
-) {
+fn print_variant_row<T>(name: &str, report: &T, dim: usize, qjl_bits: usize)
+where
+    T: IReport,
+{
     let recall_10 = report.recall(10).unwrap_or(0.0);
     let recall_100 = report.recall(100).unwrap_or(0.0);
-    let encode_ms = encode_elapsed
-        .map(duration_ms)
+    let encode_time = report
+        .encode_time()
+        .map(|value| format!("{value:.3}"))
+        .unwrap_or_else(|| "-".to_owned());
+    let decode_time = report
+        .decode_time()
+        .map(|value| format!("{value:.3}"))
+        .unwrap_or_else(|| "-".to_owned());
+    let search_time = report
+        .search_time()
         .map(|value| format!("{value:.3}"))
         .unwrap_or_else(|| "-".to_owned());
     println!(
-        "{:<24} {:>10.4} {:>10.4} {:>11} {:>11.3} {:>11.3} {:>12} {:>12}",
-        name,
-        recall_10,
-        recall_100,
-        encode_ms,
-        duration_ms(search_elapsed),
-        duration_ms(total_elapsed),
-        dim,
-        qjl_bits
+        "{:<24} {:>10.4} {:>10.4} {:>11} {:>11} {:>11} {:>12} {:>12}",
+        name, recall_10, recall_100, encode_time, decode_time, search_time, dim, qjl_bits
     );
 }
 
 fn build_variants(dim: usize, bits: u8, seed: u64) -> Vec<Variant> {
     let scalar = Variant {
-        name: "scalar/Haar".into(),
+        name: "default/Haar".into(),
         config: TurboQuantConfig::new(dim, bits, seed),
         use_simd: false,
     };
@@ -474,4 +364,269 @@ fn extract_row<OffsetSize: OffsetSizeTrait, Values>(
     Ok((start..end)
         .map(|index| read_value(values, index))
         .collect())
+}
+
+trait IReport {
+    fn recall(&self, k: usize) -> Option<f32>;
+    fn encode_time(&self) -> Option<f64>;
+    fn decode_time(&self) -> Option<f64>;
+    fn search_time(&self) -> Option<f64>;
+}
+
+struct BaseLineReport {
+    pub recall_data: Vec<Vec<usize>>,
+    pub search_time: Option<f64>,
+}
+impl IReport for BaseLineReport {
+    fn recall(&self, _: usize) -> Option<f32> {
+        return Some(1.0);
+    }
+    fn encode_time(&self) -> Option<f64> {
+        return None;
+    }
+    fn decode_time(&self) -> Option<f64> {
+        return None;
+    }
+    fn search_time(&self) -> Option<f64> {
+        return self.search_time;
+    }
+}
+
+struct ReportItem {
+    pub k: usize,
+    pub recall: f32,
+}
+
+struct TurboQuantReport {
+    pub all: Vec<ReportItem>,
+    pub encode_time: Option<f64>,
+    pub decode_time: Option<f64>,
+    pub search_time: Option<f64>,
+}
+
+impl TurboQuantReport {
+    #[must_use]
+    pub fn with_encode_time(mut self, encode_time: Option<f64>) -> Self {
+        self.encode_time = encode_time;
+        self
+    }
+}
+
+impl IReport for TurboQuantReport {
+    fn recall(&self, k: usize) -> Option<f32> {
+        self.all
+            .iter()
+            .find(|entry| entry.k == k)
+            .map(|entry| entry.recall)
+    }
+    fn encode_time(&self) -> Option<f64> {
+        return self.encode_time;
+    }
+    fn decode_time(&self) -> Option<f64> {
+        return self.decode_time;
+    }
+    fn search_time(&self) -> Option<f64> {
+        return self.search_time;
+    }
+}
+
+fn recall_for_baseline<F>(
+    original: &[Vec<f32>],
+    queries: &[Vec<f32>],
+    ks: &[usize],
+    score_fn: F,
+) -> BaseLineReport
+where
+    F: Fn(&Vec<f32>, &Vec<f32>) -> f32,
+{
+    let max_k = ks.iter().copied().max().unwrap_or(0);
+    let mut recall_data = Vec::with_capacity(queries.len());
+    let mut search_time: f64 = 0.0;
+
+    for query in queries {
+        let started = Instant::now();
+        let mut exact_scores: Vec<(usize, f32)> = original
+            .iter()
+            .enumerate()
+            .map(|(index, vector)| (index, score_fn(query, vector)))
+            .collect();
+        search_time += duration_ms(started.elapsed());
+        exact_scores.sort_by(|lhs, rhs| rhs.1.total_cmp(&lhs.1));
+        recall_data.push(
+            exact_scores
+                .iter()
+                .take(max_k)
+                .map(|&(index, _)| index)
+                .collect(),
+        );
+    }
+    BaseLineReport {
+        recall_data,
+        search_time: Some(search_time),
+    }
+}
+
+fn recall_for_turboquant<F>(
+    codec: &TurboQuantCodec,
+    encoded: &[TurboQuantVector],
+    queries: &[Vec<f32>],
+    ks: &[usize],
+    score_fn: F,
+    baseline_result: &BaseLineReport,
+) -> Result<TurboQuantReport, EncodingError>
+where
+    F: Fn(&Vec<f32>, &Vec<f32>) -> f32,
+{
+    let mut hit_counts: BTreeMap<usize, usize> = ks.iter().copied().map(|k| (k, 0)).collect();
+    let total = queries.len();
+
+    let started = Instant::now();
+    let dequantized_vectors = encoded
+        .iter()
+        .map(|vector| codec.dequantize(vector))
+        .collect::<Result<Vec<Vec<f32>>, EncodingError>>()?;
+
+    let decode_time: f64 = duration_ms(started.elapsed());
+    let mut search_time: f64 = 0.0;
+    for (query, exact_top_k) in queries.iter().zip(&baseline_result.recall_data) {
+        let started = Instant::now();
+        let mut approx_scores: Vec<(usize, f32)> = dequantized_vectors
+            .iter()
+            .enumerate()
+            .map(|(index, vector)| {
+                let score = score_fn(query, vector);
+                Ok((index, score))
+            })
+            .collect::<Result<Vec<_>, EncodingError>>()?;
+        search_time += duration_ms(started.elapsed());
+        approx_scores.sort_by(|lhs, rhs| rhs.1.total_cmp(&lhs.1));
+
+        for &k in ks {
+            let exact: BTreeSet<_> = exact_top_k.iter().take(k).copied().collect();
+            let approx: BTreeSet<_> = approx_scores
+                .iter()
+                .take(k)
+                .map(|&(index, _)| index)
+                .collect();
+            let hits = exact.intersection(&approx).count();
+            *hit_counts.get_mut(&k).expect("k should exist") += hits;
+        }
+    }
+
+    let all_report = ks
+        .iter()
+        .map(|&k| ReportItem {
+            k: k,
+            recall: hit_counts[&k] as f32 / (total * k) as f32,
+        })
+        .collect();
+
+    Ok(TurboQuantReport {
+        all: all_report,
+        encode_time: None,
+        decode_time: Some(decode_time),
+        search_time: Some(search_time),
+    })
+}
+
+fn run() -> Result<(), String> {
+    let args = Args::parse(std::env::args().skip(1))?;
+    if args.help {
+        println!(
+            "Usage:
+  cargo run -p quantization --bin turboquant_bench -- [options]
+
+Options:
+  --dataset-path <path>    Hugging Face Arrow cache directory or one `.arrow` shard
+  --dataset-column <name>  Embedding column to read. Default: openai
+  --vectors <usize>     Database vector count. Default: 2000
+  --queries <usize>     Query count. Default: 200
+  --bits <u8>           Scalar quantization bits. Default: 3
+  --query-offset <usize>
+                        Query slice start row inside the dataset. Default: same as --vectors
+  -h, --help            Show this help"
+        );
+        return Ok(());
+    }
+
+    let dataset_path = args
+        .dataset_path
+        .as_ref()
+        .ok_or_else(|| "--dataset-path is required".to_owned())?
+        .clone();
+    let (dataset, queries, dim) = load_arrow_dataset(
+        &dataset_path,
+        args.dataset_column,
+        args.vectors,
+        args.queries,
+        args.query_offset.unwrap_or(args.vectors),
+    )?;
+    let ks = [10, 100];
+    let seed = 42;
+    let variants = build_variants(dim, args.bits, 42);
+    let baseline_report =
+        recall_for_baseline(&dataset, &queries, &ks, |v1, v2| simd::dot_plain(v1, v2));
+
+    println!(
+        "TurboQuant benchmark\n  dim={} vectors={} queries={} bits={} seed={} source={}\n",
+        dim,
+        args.vectors,
+        args.queries,
+        args.bits,
+        seed,
+        dataset_path.display()
+    );
+    println!(
+        "{:<24} {:>10} {:>10} {:>11} {:>11} {:>11} {:>12} {:>12}",
+        "variant",
+        "recall@10",
+        "recall@100",
+        "encode_ms",
+        "decode_ms",
+        "search_ms",
+        "dim",
+        "qjl_bits"
+    );
+    println!("{}", "-".repeat(108));
+    print_variant_row("exact/f32", &baseline_report, dim, 0);
+
+    for variant in variants {
+        let codec = TurboQuantCodec::new(variant.config.clone()).map_err(|err| err.to_string())?;
+        let encode_started = Instant::now();
+        let encoded = codec
+            .quantize_batch(&dataset)
+            .map_err(|err| err.to_string())?;
+        let encode_elapsed = encode_started.elapsed();
+        let report = recall_for_turboquant(
+            &codec,
+            &encoded,
+            &queries,
+            &ks,
+            |v1, v2| {
+                if variant.use_simd {
+                    return simd::dot(v1, v2);
+                } else {
+                    return simd::dot_plain(v1, v2);
+                }
+            },
+            &baseline_report,
+        )
+        .map_err(|err| err.to_string())?;
+        let report = report.with_encode_time(Some(duration_ms(encode_elapsed)));
+        print_variant_row(
+            &variant.name,
+            &report,
+            dim,
+            if variant.config.qjl() { dim } else { 0 },
+        );
+    }
+
+    Ok(())
+}
+
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("turboquant_bench error: {error}");
+        std::process::exit(1);
+    }
 }

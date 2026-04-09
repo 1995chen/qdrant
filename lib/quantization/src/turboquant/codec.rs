@@ -1,5 +1,3 @@
-use std::fmt;
-
 use super::{TurboQuantConfig, TurboQuantVector, codebook, math, packing, qjl, rotation, simd};
 use crate::EncodingError;
 
@@ -9,14 +7,6 @@ pub struct TurboQuantCodec {
     rotation: rotation::Rotation,
     codebook: codebook::QuantizationCodebook,
     qjl: Option<qjl::QjlProjector>,
-}
-
-impl fmt::Debug for TurboQuantCodec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TurboQuantCodec")
-            .field("config", &self.config)
-            .finish_non_exhaustive()
-    }
 }
 
 impl TurboQuantCodec {
@@ -115,7 +105,6 @@ impl TurboQuantCodec {
         encoded: &TurboQuantVector,
         output: &mut [f32],
     ) -> Result<(), EncodingError> {
-        encoded.validate(&self.config)?;
         if output.len() != self.config.dim() {
             return Err(EncodingError::ArgumentsError(format!(
                 "TurboQuant dequantize output expected dim {}, got {}",

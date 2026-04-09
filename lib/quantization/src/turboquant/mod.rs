@@ -21,17 +21,12 @@ mod config;
 mod math;
 mod packing;
 mod qjl;
-mod recall;
 mod rotation;
-mod simd;
+pub mod simd;
 mod vector;
 
 pub use codec::TurboQuantCodec;
 pub use config::{NormCorrection, TurboQuantConfig};
 pub use qjl::QjlResidual;
-pub use recall::{
-    ExactSearchBaseline, RecallAtK, RecallEvaluation, RecallReport, compute_exact_baseline,
-    evaluate_recall, evaluate_recall_with_baseline,
-};
 pub use rotation::RotationKind;
 pub use vector::TurboQuantVector;

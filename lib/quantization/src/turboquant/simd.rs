@@ -32,7 +32,7 @@ pub fn dot(lhs: &[f32], rhs: &[f32]) -> f32 {
     dot_plain(lhs, rhs)
 }
 
-fn dot_plain(lhs: &[f32], rhs: &[f32]) -> f32 {
+pub fn dot_plain(lhs: &[f32], rhs: &[f32]) -> f32 {
     lhs.iter().zip(rhs).map(|(&a, &b)| a * b).sum()
 }
 
