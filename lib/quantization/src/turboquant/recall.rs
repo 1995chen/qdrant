@@ -105,7 +105,7 @@ pub fn evaluate_recall_with_baseline(
                 let score = if use_simd {
                     codec.score_dot_simd(query, vector)
                 } else {
-                    codec.score_dot_scalar(query, vector)
+                    codec.score_dot_plain(query, vector)
                 };
                 (index, score)
             })

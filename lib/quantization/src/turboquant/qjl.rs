@@ -32,7 +32,7 @@ impl QjlProjector {
         let mut rng = StdRng::seed_from_u64(seed);
         let mut matrix = Vec::with_capacity(dim * dim);
         while matrix.len() < dim * dim {
-            let (z0, z1) = box_muller(&mut rng);
+            let (z0, z1) = Self::box_muller(&mut rng);
             matrix.push(z0);
             if matrix.len() < dim * dim {
                 matrix.push(z1);
@@ -76,12 +76,12 @@ impl QjlProjector {
         reconstruction.iter_mut().for_each(|value| *value *= scale);
         reconstruction
     }
-}
 
-fn box_muller(rng: &mut StdRng) -> (f32, f32) {
-    let u1 = (1.0f32 - rng.random::<f32>()).max(1e-12f32);
-    let u2 = rng.random::<f32>();
-    let radius = (-2.0f32 * u1.ln()).sqrt();
-    let theta = 2.0f32 * std::f32::consts::PI * u2;
-    (radius * theta.cos(), radius * theta.sin())
+    fn box_muller(rng: &mut StdRng) -> (f32, f32) {
+        let u1 = (1.0f32 - rng.random::<f32>()).max(1e-12f32);
+        let u2 = rng.random::<f32>();
+        let radius = (-2.0f32 * u1.ln()).sqrt();
+        let theta = 2.0f32 * std::f32::consts::PI * u2;
+        (radius * theta.cos(), radius * theta.sin())
+    }
 }

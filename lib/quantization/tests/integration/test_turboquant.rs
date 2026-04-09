@@ -66,7 +66,7 @@ mod tests {
 
     #[test]
     fn turboquant_pack_unpack_roundtrip_for_three_bits() {
-        let config = TurboQuantConfig::scalar(64, 3, 7);
+        let config = TurboQuantConfig::baseline(64, 3, 7);
         let codec = TurboQuantCodec::new(config).unwrap();
 
         let vector: Vec<f32> = (0..64).map(|index| (index as f32 * 0.1).sin()).collect();
@@ -78,14 +78,14 @@ mod tests {
     }
 
     #[test]
-    fn scalar_turboquant_recall_is_reasonable() {
+    fn baseline_turboquant_recall_is_reasonable() {
         let (dataset, queries) = synthetic_dataset(41, 768, 64, 64);
-        let codec = TurboQuantCodec::new(TurboQuantConfig::scalar(64, 3, 41)).unwrap();
+        let codec = TurboQuantCodec::new(TurboQuantConfig::baseline(64, 3, 41)).unwrap();
         let encoded = codec.quantize_batch(&dataset).unwrap();
 
         let report = evaluate_recall(&codec, &encoded, &dataset, &queries, &[10, 100], false);
 
-        eprintln!("scalar report: {report:?}");
+        eprintln!("baseline report: {report:?}");
         assert!(report.recall(10).unwrap() > 0.82);
         assert!(report.recall(100).unwrap() > 0.92);
     }
@@ -116,7 +116,7 @@ mod tests {
             let baseline = TurboQuantCodec::new(TurboQuantConfig {
                 dim: 64,
                 bit_width: 3,
-                rotation: RotationKind::DenseHaar,
+                rotation: RotationKind::Haar,
                 seed,
                 qjl: false,
                 norm_correction: NormCorrection::Disabled,
@@ -125,7 +125,7 @@ mod tests {
             let corrected = TurboQuantCodec::new(TurboQuantConfig {
                 dim: 64,
                 bit_width: 3,
-                rotation: RotationKind::DenseHaar,
+                rotation: RotationKind::Haar,
                 seed,
                 qjl: false,
                 norm_correction: NormCorrection::Exact,
@@ -173,12 +173,12 @@ mod tests {
     }
 
     #[test]
-    fn simd_scores_match_scalar_scores() {
+    fn simd_scores_match_plain_scores() {
         let (dataset, queries) = synthetic_dataset(123, 192, 8, 64);
         let codec = TurboQuantCodec::new(TurboQuantConfig {
             dim: 64,
             bit_width: 4,
-            rotation: RotationKind::WalshHadamard,
+            rotation: RotationKind::Hadamard,
             seed: 123,
             qjl: false,
             norm_correction: NormCorrection::Exact,
@@ -188,15 +188,15 @@ mod tests {
 
         for query in &queries {
             for vector in &encoded {
-                let scalar = codec.score_dot_scalar(query, vector);
+                let plain = codec.score_dot_plain(query, vector);
                 let simd = codec.score_dot_simd(query, vector);
-                assert!((scalar - simd).abs() < 1e-4);
+                assert!((plain - simd).abs() < 1e-4);
             }
         }
 
-        let scalar_report =
+        let plain_report =
             evaluate_recall(&codec, &encoded, &dataset, &queries, &[10, 100], false);
         let simd_report = evaluate_recall(&codec, &encoded, &dataset, &queries, &[10, 100], true);
-        assert_eq!(scalar_report, simd_report);
+        assert_eq!(plain_report, simd_report);
     }
 }

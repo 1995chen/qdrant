@@ -220,11 +220,11 @@ fn print_variant_row(
 
 fn build_variants(dim: usize, bits: u8, seed: u64) -> Vec<Variant> {
     let scalar = Variant {
-        name: "scalar/DenseHaar".into(),
+        name: "scalar/Haar".into(),
         config: TurboQuantConfig {
             dim,
             bit_width: bits,
-            rotation: RotationKind::DenseHaar,
+            rotation: RotationKind::Haar,
             seed: seed,
             qjl: false,
             norm_correction: NormCorrection::Disabled,
@@ -233,11 +233,11 @@ fn build_variants(dim: usize, bits: u8, seed: u64) -> Vec<Variant> {
     };
 
     let qjl_dense = Variant {
-        name: "qjl/DenseHaar".into(),
+        name: "qjl/Haar".into(),
         config: TurboQuantConfig {
             dim,
             bit_width: bits,
-            rotation: RotationKind::DenseHaar,
+            rotation: RotationKind::Haar,
             seed: seed,
             qjl: true,
             norm_correction: NormCorrection::Disabled,
@@ -246,11 +246,11 @@ fn build_variants(dim: usize, bits: u8, seed: u64) -> Vec<Variant> {
     };
 
     let qjl_norm_dense = Variant {
-        name: "qjl+norm/DenseHaar".into(),
+        name: "qjl+norm/Haar".into(),
         config: TurboQuantConfig {
             dim,
             bit_width: bits,
-            rotation: RotationKind::DenseHaar,
+            rotation: RotationKind::Haar,
             seed: seed,
             qjl: true,
             norm_correction: NormCorrection::Exact,
@@ -259,11 +259,11 @@ fn build_variants(dim: usize, bits: u8, seed: u64) -> Vec<Variant> {
     };
 
     let qjl_norm_wht = Variant {
-        name: "qjl+norm/WalshHadamard".into(),
+        name: "qjl+norm/Hadamard".into(),
         config: TurboQuantConfig {
             dim,
             bit_width: bits,
-            rotation: RotationKind::WalshHadamard,
+            rotation: RotationKind::Hadamard,
             seed: seed,
             qjl: true,
             norm_correction: NormCorrection::Exact,
@@ -272,11 +272,11 @@ fn build_variants(dim: usize, bits: u8, seed: u64) -> Vec<Variant> {
     };
 
     let norm = Variant {
-        name: "norm/DenseHaar".into(),
+        name: "norm/Haar".into(),
         config: TurboQuantConfig {
             dim,
             bit_width: bits,
-            rotation: RotationKind::DenseHaar,
+            rotation: RotationKind::Haar,
             seed: seed,
             qjl: false,
             norm_correction: NormCorrection::Exact,
@@ -285,11 +285,11 @@ fn build_variants(dim: usize, bits: u8, seed: u64) -> Vec<Variant> {
     };
 
     let simd = Variant {
-        name: "simd/DenseHaar".into(),
+        name: "simd/Haar".into(),
         config: TurboQuantConfig {
             dim,
             bit_width: bits,
-            rotation: RotationKind::DenseHaar,
+            rotation: RotationKind::Haar,
             seed: seed,
             qjl: false,
             norm_correction: NormCorrection::Exact,

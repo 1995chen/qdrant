@@ -1,10 +1,10 @@
 cargo run --release -p quantization --bin turboquant_bench -- \
   --dataset-path /data/chenl/workspace/dataset/dbpedia-entities-openai3-text-embedding-3-small-1536-100K/0d5fd00fbc5a9c0c836d70cd409f7e461255e572 \
   --dataset-column text-embedding-3-small-1536-embedding \
-  --vectors 2000 \
-  --queries 50 \
+  --vectors 1000 \
+  --queries 10 \
   --bits 3 \
-  --query-offset 2000
+  --query-offset 1000
 
 cargo test -p quantization turboquant::math -- --nocapture
 cargo +nightly fmt --all

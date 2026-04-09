@@ -5,11 +5,11 @@
 //! The implementation is intentionally split into small modules so we can
 //! validate each stage independently:
 //! - random / structured rotations
-//! - Lloyd-Max scalar codebooks
+//! - Lloyd-Max level codebooks
 //! - generic bit pack / unpack
 //! - optional 1-bit QJL residuals
 //! - optional norm-correction scaling
-//! - scalar and SIMD scoring paths
+//! - plain and SIMD scoring paths
 //!
 //! This module does not integrate with Qdrant storage yet. It only focuses on
 //! encoding, decoding, scoring, and recall evaluation so the algorithm can be
@@ -37,7 +37,7 @@ use crate::EncodingError;
 /// Runtime configuration for the standalone TurboQuant codec.
 ///
 /// The four requested variants are all represented by this single config:
-/// - scalar baseline: `qjl = false`, `norm_correction = Disabled`
+/// - baseline variant: `qjl = false`, `norm_correction = Disabled`
 /// - QJL variant: `qjl = true`
 /// - norm-correction variant: `norm_correction = Exact`
 /// - SIMD variant: same encoding, but queried through `score_dot_simd`
@@ -45,9 +45,9 @@ use crate::EncodingError;
 pub struct TurboQuantConfig {
     /// Original vector dimensionality.
     pub dim: usize,
-    /// Number of scalar quantization bits used by the first stage.
+    /// Number of first-stage quantization bits used by the level codec.
     pub bit_width: u8,
-    /// Rotation backend used before scalar quantization.
+    /// Rotation backend used before level quantization.
     pub rotation: RotationKind,
     /// Seed used for random rotation / random projections.
     pub seed: u64,
@@ -73,42 +73,42 @@ impl TurboQuantConfig {
         Ok(())
     }
 
-    /// Faithful scalar baseline that reproduces the TheTom prototype shape:
-    /// normalize -> rotate -> Lloyd-Max scalar quantize -> pack.
-    pub fn scalar(dim: usize, bit_width: u8, seed: u64) -> Self {
+    /// Faithful baseline that reproduces the TheTom prototype shape:
+    /// normalize -> rotate -> Lloyd-Max level quantize -> pack.
+    pub fn baseline(dim: usize, bit_width: u8, seed: u64) -> Self {
         Self {
             dim,
             bit_width,
-            rotation: RotationKind::DenseHaar,
+            rotation: RotationKind::Haar,
             seed,
             qjl: false,
             norm_correction: NormCorrection::Disabled,
         }
     }
 
-    /// Discussion-friendly variant that keeps the scalar stage but adds a
+    /// QJL variant that keeps the same baseline rotation path and adds a
     /// second 1-bit QJL residual.
     ///
-    /// We default to WHT here because discussion #20969 repeatedly reports
-    /// lower variance with WHT pre-conditioning than with a dense random
-    /// rotation for the residual-augmented path.
+    /// The TurboQuant paper only requires a random rotation. We keep
+    /// `Hadamard` available as a structured backend, but default to the
+    /// dense path here so the config matches the paper's simpler presentation.
     pub fn with_qjl(dim: usize, bit_width: u8, seed: u64) -> Self {
         Self {
             dim,
             bit_width,
-            rotation: RotationKind::WalshHadamard,
+            rotation: RotationKind::Haar,
             seed,
             qjl: true,
             norm_correction: NormCorrection::Disabled,
         }
     }
 
-    /// 3-bit scalar path with norm correction enabled.
+    /// 3-bit baseline path with norm correction enabled.
     pub fn with_norm_correction(dim: usize, bit_width: u8, seed: u64) -> Self {
         Self {
             dim,
             bit_width,
-            rotation: RotationKind::DenseHaar,
+            rotation: RotationKind::Haar,
             seed,
             qjl: false,
             norm_correction: NormCorrection::Exact,
@@ -163,7 +163,7 @@ impl NormCorrection {
 
 /// Encoded representation of one vector.
 ///
-/// `packed_levels` always contains the scalar stage. `qjl` is only populated
+/// `packed_levels` always contains the level stage. `qjl` is only populated
 /// when the codec was created with `config.qjl = true`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurboQuantVector {
@@ -182,7 +182,7 @@ impl TurboQuantVector {
 pub struct TurboQuantCodec {
     config: TurboQuantConfig,
     rotation: rotation::Rotation,
-    codebook: codebook::ScalarCodebook,
+    codebook: codebook::QuantizationCodebook,
     qjl: Option<qjl::QjlProjector>,
 }
 
@@ -199,7 +199,7 @@ impl TurboQuantCodec {
         config.validate()?;
 
         let rotation = rotation::Rotation::new(config.rotation, config.dim, config.seed)?;
-        let codebook = codebook::ScalarCodebook::new(config.bit_width, config.dim);
+        let codebook = codebook::QuantizationCodebook::new(config.bit_width, config.dim);
         let qjl = config
             .qjl
             .then(|| qjl::QjlProjector::new(config.dim, config.seed ^ 0x5bf0_3635_d4f9_8a51));
@@ -250,12 +250,12 @@ impl TurboQuantCodec {
 
         let packed_levels = packing::pack_bits(&levels, self.config.bit_width);
         let qjl = self.qjl.as_ref().map(|projector| {
-            let scalar_reconstruction = self
+            let base_reconstruction = self
                 .rotation
                 .apply_transpose(&rotated_reconstruction, scale);
             let residual: Vec<f32> = vector
                 .iter()
-                .zip(&scalar_reconstruction)
+                .zip(&base_reconstruction)
                 .map(|(&v, &hat)| v - hat)
                 .collect();
             projector.quantize(&residual)
@@ -316,8 +316,8 @@ impl TurboQuantCodec {
         output.copy_from_slice(&base);
     }
 
-    /// Scalar score path used for correctness baselines.
-    pub fn score_dot_scalar(&self, query: &[f32], encoded: &TurboQuantVector) -> f32 {
+    /// Plain score path used for correctness baselines.
+    pub fn score_dot_plain(&self, query: &[f32], encoded: &TurboQuantVector) -> f32 {
         let reconstruction = self.dequantize(encoded);
         query
             .iter()
@@ -326,7 +326,7 @@ impl TurboQuantCodec {
             .sum()
     }
 
-    /// SIMD-capable score path. The encoding is identical to the scalar path;
+    /// SIMD-capable score path. The encoding is identical to the plain path;
     /// only the final dot product is accelerated.
     pub fn score_dot_simd(&self, query: &[f32], encoded: &TurboQuantVector) -> f32 {
         let reconstruction = self.dequantize(encoded);

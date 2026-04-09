@@ -29,10 +29,10 @@ pub fn dot(lhs: &[f32], rhs: &[f32]) -> f32 {
         }
     }
 
-    dot_scalar(lhs, rhs)
+    dot_plain(lhs, rhs)
 }
 
-fn dot_scalar(lhs: &[f32], rhs: &[f32]) -> f32 {
+fn dot_plain(lhs: &[f32], rhs: &[f32]) -> f32 {
     lhs.iter().zip(rhs).map(|(&a, &b)| a * b).sum()
 }
 
@@ -53,7 +53,7 @@ unsafe fn dot_avx2(lhs: &[f32], rhs: &[f32]) -> f32 {
     let mut lanes = [0.0f32; 8];
     unsafe { _mm256_storeu_ps(lanes.as_mut_ptr(), sum) };
     let mut total: f32 = lanes.into_iter().sum();
-    total += dot_scalar(&lhs[index..], &rhs[index..]);
+    total += dot_plain(&lhs[index..], &rhs[index..]);
     total
 }
 
@@ -74,7 +74,7 @@ unsafe fn dot_avx512(lhs: &[f32], rhs: &[f32]) -> f32 {
     let mut lanes = [0.0f32; 16];
     unsafe { _mm512_storeu_ps(lanes.as_mut_ptr(), sum) };
     let mut total: f32 = lanes.into_iter().sum();
-    total += dot_scalar(&lhs[index..], &rhs[index..]);
+    total += dot_plain(&lhs[index..], &rhs[index..]);
     total
 }
 
@@ -92,6 +92,6 @@ unsafe fn dot_neon(lhs: &[f32], rhs: &[f32]) -> f32 {
     }
 
     let mut total = vaddvq_f32(sum);
-    total += dot_scalar(&lhs[index..], &rhs[index..]);
+    total += dot_plain(&lhs[index..], &rhs[index..]);
     total
 }
