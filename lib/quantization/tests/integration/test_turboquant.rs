@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use quantization::turboquant::{
-        NormCorrection, RotationKind, TurboQuantCodec, TurboQuantConfig, evaluate_recall,
+        NormCorrection, TurboQuantCodec, TurboQuantConfig, evaluate_recall,
     };
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
@@ -170,9 +170,7 @@ mod tests {
     fn simd_scores_match_plain_scores() {
         let (dataset, queries) = synthetic_dataset(123, 192, 8, 64);
         let codec = TurboQuantCodec::new(
-            TurboQuantConfig::new(64, 4, 123)
-                .with_rotation(RotationKind::Hadamard)
-                .with_norm_correction(NormCorrection::Exact),
+            TurboQuantConfig::new(64, 4, 123).with_norm_correction(NormCorrection::Exact),
         )
         .unwrap();
         let encoded = codec.quantize_batch(&dataset).unwrap();

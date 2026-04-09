@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use arrow_array::{Array, Float32Array, Float64Array, GenericListArray, OffsetSizeTrait};
 use arrow_ipc::reader::{FileReader, StreamReader};
 use quantization::turboquant::{
-    NormCorrection, RecallReport, RotationKind, TurboQuantCodec, TurboQuantConfig,
-    compute_exact_baseline, evaluate_recall_with_baseline,
+    NormCorrection, RecallReport, TurboQuantCodec, TurboQuantConfig, compute_exact_baseline,
+    evaluate_recall_with_baseline,
 };
 
 #[derive(Debug, Clone)]
@@ -240,15 +240,6 @@ fn build_variants(dim: usize, bits: u8, seed: u64) -> Vec<Variant> {
         use_simd: false,
     };
 
-    let qjl_norm_wht = Variant {
-        name: "qjl+norm/Hadamard".into(),
-        config: TurboQuantConfig::new(dim, bits, seed)
-            .with_rotation(RotationKind::Hadamard)
-            .with_qjl(true)
-            .with_norm_correction(NormCorrection::Exact),
-        use_simd: false,
-    };
-
     let norm = Variant {
         name: "norm/Haar".into(),
         config: TurboQuantConfig::new(dim, bits, seed).with_norm_correction(NormCorrection::Exact),
@@ -261,7 +252,7 @@ fn build_variants(dim: usize, bits: u8, seed: u64) -> Vec<Variant> {
         use_simd: true,
     };
 
-    vec![scalar, qjl_dense, qjl_norm_dense, qjl_norm_wht, norm, simd]
+    vec![scalar, qjl_dense, qjl_norm_dense, norm, simd]
 }
 
 fn parse_value<T: std::str::FromStr>(flag: &str, value: Option<String>) -> Result<T, String> {
