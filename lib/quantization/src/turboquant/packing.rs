@@ -31,7 +31,15 @@ pub fn pack_bits(values: &[u8], bit_width: u8) -> Vec<u8> {
     packed
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn unpack_bits(packed: &[u8], bit_width: u8, value_count: usize) -> Vec<u8> {
+    let mut output = vec![0u8; value_count];
+    unpack_bits_into(packed, bit_width, &mut output);
+    output
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn unpack_bits_into(packed: &[u8], bit_width: u8, output: &mut [u8]) {
     debug_assert!((1..=8).contains(&bit_width));
 
     let mask = if bit_width == 8 {
@@ -40,24 +48,22 @@ pub fn unpack_bits(packed: &[u8], bit_width: u8, value_count: usize) -> Vec<u8> 
         (1u16 << bit_width) - 1
     };
 
-    let mut output = Vec::with_capacity(value_count);
     let mut bit_offset = 0usize;
-    for _ in 0..value_count {
+    for value in output.iter_mut() {
         let byte_index = bit_offset / 8;
         let shift = bit_offset % 8;
-        let mut value = (packed[byte_index] as u16) >> shift;
+        let mut unpacked = (packed[byte_index] as u16) >> shift;
         if shift + bit_width as usize > 8 {
-            value |= (packed[byte_index + 1] as u16) << (8 - shift);
+            unpacked |= (packed[byte_index + 1] as u16) << (8 - shift);
         }
-        output.push((value & mask) as u8);
+        *value = (unpacked & mask) as u8;
         bit_offset += bit_width as usize;
     }
-    output
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{pack_bits, unpack_bits};
+    use super::{pack_bits, unpack_bits, unpack_bits_into};
 
     #[test]
     fn pack_and_unpack_roundtrip_across_common_bit_widths() {
@@ -105,5 +111,14 @@ mod tests {
         let packed = pack_bits(&values, 3);
         let unpacked = unpack_bits(&packed, 3, values.len());
         assert_eq!(unpacked, vec![0b111, 0b001, 0b111]);
+    }
+
+    #[test]
+    fn unpack_bits_into_matches_allocating_variant() {
+        let values = [7, 0, 5, 3, 6];
+        let packed = pack_bits(&values, 3);
+        let mut unpacked = [0u8; 5];
+        unpack_bits_into(&packed, 3, &mut unpacked);
+        assert_eq!(unpacked, values);
     }
 }

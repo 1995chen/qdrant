@@ -437,7 +437,7 @@ fn recall_for_baseline<F>(
     score_fn: F,
 ) -> BaseLineReport
 where
-    F: Fn(&Vec<f32>, &Vec<f32>) -> f32,
+    F: Fn(&[f32], &[f32]) -> f32,
 {
     let max_k = ks.iter().copied().max().unwrap_or(0);
     let mut recall_data = Vec::with_capacity(queries.len());
@@ -475,29 +475,30 @@ fn recall_for_turboquant<F>(
     baseline_result: &BaseLineReport,
 ) -> Result<TurboQuantReport, EncodingError>
 where
-    F: Fn(&Vec<f32>, &Vec<f32>) -> f32,
+    F: Fn(&[f32], &[f32]) -> f32,
 {
     let mut hit_counts: BTreeMap<usize, usize> = ks.iter().copied().map(|k| (k, 0)).collect();
     let total = queries.len();
+    let dim = codec.config().dim();
 
     let started = Instant::now();
-    let dequantized_vectors = encoded
+    let mut dequantized_vectors = vec![0.0f32; encoded.len() * dim];
+    for (vector, output) in encoded
         .iter()
-        .map(|vector| codec.dequantize(vector))
-        .collect::<Result<Vec<Vec<f32>>, EncodingError>>()?;
+        .zip(dequantized_vectors.chunks_exact_mut(dim))
+    {
+        codec.dequantize_into(vector, output)?;
+    }
 
     let decode_time: f64 = duration_ms(started.elapsed());
     let mut search_time: f64 = 0.0;
     for (query, exact_top_k) in queries.iter().zip(&baseline_result.recall_data) {
         let started = Instant::now();
         let mut approx_scores: Vec<(usize, f32)> = dequantized_vectors
-            .iter()
+            .chunks_exact(dim)
             .enumerate()
-            .map(|(index, vector)| {
-                let score = score_fn(query, vector);
-                Ok((index, score))
-            })
-            .collect::<Result<Vec<_>, EncodingError>>()?;
+            .map(|(index, vector)| (index, score_fn(query, vector)))
+            .collect();
         search_time += duration_ms(started.elapsed());
         approx_scores.sort_by(|lhs, rhs| rhs.1.total_cmp(&lhs.1));
 

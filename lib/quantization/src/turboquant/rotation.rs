@@ -34,8 +34,14 @@ impl Rotation {
     }
 
     pub fn apply_transpose(&self, input: &[f32], scale: f32) -> Vec<f32> {
+        let mut output = vec![0.0; input.len()];
+        self.apply_transpose_into(input, scale, &mut output);
+        output
+    }
+
+    pub fn apply_transpose_into(&self, input: &[f32], scale: f32, output: &mut [f32]) {
         match self {
-            Self::Haar(rotation) => rotation.apply_transpose(input, scale),
+            Self::Haar(rotation) => rotation.apply_transpose_into(input, scale, output),
         }
     }
 }
@@ -99,8 +105,10 @@ impl HaarRotation {
             .collect()
     }
 
-    fn apply_transpose(&self, input: &[f32], scale: f32) -> Vec<f32> {
-        let mut output = vec![0.0f32; self.dim];
+    fn apply_transpose_into(&self, input: &[f32], scale: f32, output: &mut [f32]) {
+        debug_assert_eq!(input.len(), self.dim);
+        debug_assert_eq!(output.len(), self.dim);
+        output.fill(0.0);
         for row in 0..self.dim {
             let coefficient = input[row] * scale;
             let row_slice = &self.matrix[row * self.dim..(row + 1) * self.dim];
@@ -108,6 +116,5 @@ impl HaarRotation {
                 *out += coefficient * value;
             }
         }
-        output
     }
 }

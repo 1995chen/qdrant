@@ -54,27 +54,46 @@ impl QjlProjector {
         QjlResidual::new(packing::pack_bits(&signs, 1), norm)
     }
 
+    #[allow(dead_code)]
     pub fn dequantize(&self, residual: &QjlResidual) -> Result<Vec<f32>, EncodingError> {
-        residual.validate(self.dim)?;
+        let mut output = vec![0.0; self.dim];
+        self.dequantize_into(residual, &mut output)?;
+        Ok(output)
+    }
 
-        if residual.norm() == 0.0 {
-            return Ok(vec![0.0; self.dim]);
+    pub fn dequantize_into(
+        &self,
+        residual: &QjlResidual,
+        output: &mut [f32],
+    ) -> Result<(), EncodingError> {
+        residual.validate(self.dim)?;
+        if output.len() != self.dim {
+            return Err(EncodingError::ArgumentsError(format!(
+                "TurboQuant QJL output expected dim {}, got {}",
+                self.dim,
+                output.len()
+            )));
         }
 
-        let signs = packing::unpack_bits(residual.packed_signs(), 1, self.dim);
-        let mut reconstruction = vec![0.0f32; self.dim];
+        if residual.norm() == 0.0 {
+            output.fill(0.0);
+            return Ok(());
+        }
 
+        output.fill(0.0);
         for row in 0..self.dim {
-            let sign = if signs[row] == 0 { -1.0 } else { 1.0 };
+            let byte = residual.packed_signs()[row / 8];
+            let bit = (byte >> (row % 8)) & 1;
+            let sign = if bit == 0 { -1.0 } else { 1.0 };
             let row_slice = &self.matrix[row * self.dim..(row + 1) * self.dim];
-            for (out, &value) in reconstruction.iter_mut().zip(row_slice) {
+            for (out, &value) in output.iter_mut().zip(row_slice) {
                 *out += sign * value;
             }
         }
 
         let scale = QJL_CONST * residual.norm() / self.dim as f32;
-        reconstruction.iter_mut().for_each(|value| *value *= scale);
-        Ok(reconstruction)
+        output.iter_mut().for_each(|value| *value *= scale);
+        Ok(())
     }
 }
 

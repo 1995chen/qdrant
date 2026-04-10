@@ -113,28 +113,36 @@ impl TurboQuantCodec {
             )));
         }
 
-        let levels = packing::unpack_bits(
-            encoded.packed_levels(),
-            self.config.bit_width(),
-            self.config.dim(),
-        );
-        let rotated_reconstruction: Vec<f32> = levels
-            .iter()
-            .map(|&level| self.codebook.level(level))
-            .collect();
+        let mut rotated_reconstruction = vec![0.0f32; self.config.dim()];
+        let bit_width = self.config.bit_width() as usize;
+        let mask = if bit_width == 8 {
+            u16::MAX
+        } else {
+            (1u16 << bit_width) - 1
+        };
+        let mut bit_offset = 0usize;
+        for rotated_value in &mut rotated_reconstruction {
+            let byte_index = bit_offset / 8;
+            let shift = bit_offset % 8;
+            let mut level = (encoded.packed_levels()[byte_index] as u16) >> shift;
+            if shift + bit_width > 8 {
+                level |= (encoded.packed_levels()[byte_index + 1] as u16) << (8 - shift);
+            }
+            *rotated_value = self.codebook.level((level & mask) as u8);
+            bit_offset += bit_width;
+        }
 
-        let mut base = self
-            .rotation
-            .apply_transpose(&rotated_reconstruction, encoded.scale());
+        self.rotation
+            .apply_transpose_into(&rotated_reconstruction, encoded.scale(), output);
 
         if let (Some(projector), Some(qjl)) = (&self.qjl, encoded.qjl()) {
-            let residual = projector.dequantize(qjl)?;
-            for (value, residual_value) in base.iter_mut().zip(residual) {
+            let mut residual = vec![0.0f32; self.config.dim()];
+            projector.dequantize_into(qjl, &mut residual)?;
+            for (value, residual_value) in output.iter_mut().zip(residual) {
                 *value += residual_value;
             }
         }
 
-        output.copy_from_slice(&base);
         Ok(())
     }
 
