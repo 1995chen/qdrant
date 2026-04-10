@@ -133,6 +133,40 @@ impl ReadSegmentEntry for Segment {
         )
     }
 
+    fn search_bm25(
+        &self,
+        field: &JsonPath,
+        query: &str,
+        filter: Option<&Filter>,
+        top: usize,
+        score_threshold: Option<f32>,
+        with_payload: &WithPayload,
+        with_vector: &WithVector,
+        hw_counter: &HardwareCounterCell,
+        is_stopped: &AtomicBool,
+        k1: f32,
+        b: f32,
+    ) -> OperationResult<Vec<ScoredPoint>> {
+        let internal_results = self.do_search_bm25(
+            field,
+            query,
+            filter,
+            top,
+            score_threshold,
+            is_stopped,
+            hw_counter,
+            k1,
+            b,
+        )?;
+        self.process_search_result(
+            internal_results,
+            with_payload,
+            with_vector,
+            hw_counter,
+            is_stopped,
+        )
+    }
+
     fn vector(
         &self,
         vector_name: &VectorName,

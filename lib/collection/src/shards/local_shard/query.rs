@@ -26,7 +26,7 @@ use crate::operations::universal_query::planned_query::{
     MergePlan, PlannedQuery, RescoreParams, RootPlan, Source,
 };
 use crate::operations::universal_query::shard_query::{
-    FusionInternal, MmrInternal, SampleInternal, ScoringQuery, ShardQueryResponse,
+    Bm25Internal, FusionInternal, MmrInternal, SampleInternal, ScoringQuery, ShardQueryResponse,
 };
 
 pub enum FetchedSource {
@@ -378,6 +378,18 @@ impl LocalShard {
                 )
                 .await
             }
+            ScoringQuery::Bm25(bm25) => {
+                self.bm25_rescore(
+                    sources,
+                    bm25,
+                    limit,
+                    score_threshold.map(OrderedFloat::into_inner),
+                    timeout,
+                    hw_counter_acc,
+                    search_runtime_handle,
+                )
+                .await
+            }
             ScoringQuery::Sample(sample) => match sample {
                 SampleInternal::Random => {
                     // create single scroll request for rescoring query
@@ -419,6 +431,37 @@ impl LocalShard {
                 .await
             }
         }
+    }
+
+    async fn bm25_rescore(
+        &self,
+        sources: Vec<Vec<ScoredPoint>>,
+        bm25: Bm25Internal,
+        limit: usize,
+        score_threshold: Option<f32>,
+        timeout: Duration,
+        hw_counter_acc: HwMeasurementAcc,
+        search_runtime_handle: &Handle,
+    ) -> CollectionResult<Vec<ScoredPoint>> {
+        let filter = if sources.is_empty() {
+            None
+        } else {
+            Some(filter_with_sources_ids(sources.into_iter()))
+        };
+
+        SegmentsSearcher::search_bm25(
+            self.segments.clone(),
+            &bm25,
+            filter.as_ref(),
+            limit,
+            score_threshold,
+            &false.into(),
+            &false.into(),
+            search_runtime_handle,
+            timeout,
+            hw_counter_acc,
+        )
+        .await
     }
 
     fn fusion_rescore(

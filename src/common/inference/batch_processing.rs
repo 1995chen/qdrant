@@ -112,6 +112,7 @@ fn collect_query(query: &Query, batch: &mut BatchAccum) {
         | Query::Fusion(_)
         | Query::Rrf(_)
         | Query::Formula(_)
+        | Query::Bm25(_)
         | Query::Sample(_) => {}
     }
 }

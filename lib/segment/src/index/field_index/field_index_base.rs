@@ -157,6 +157,13 @@ impl std::fmt::Debug for FieldIndex {
 }
 
 impl FieldIndex {
+    pub fn as_full_text(&self) -> Option<&FullTextIndex> {
+        match self {
+            FieldIndex::FullTextIndex(index) => Some(index),
+            _ => None,
+        }
+    }
+
     /// Try to check condition for a payload given a field index.
     /// Required because some index parameters may influence the condition checking logic.
     /// For example, full text index may have different tokenizers.

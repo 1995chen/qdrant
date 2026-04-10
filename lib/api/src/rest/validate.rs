@@ -40,6 +40,7 @@ impl Validate for Query {
             Query::Fusion(fusion) => fusion.validate(),
             Query::Rrf(rrf) => rrf.validate(),
             Query::Formula(formula) => formula.validate(),
+            Query::Bm25(bm25) => bm25.validate(),
             Query::OrderBy(order_by) => order_by.validate(),
             Query::Sample(sample) => sample.validate(),
             Query::RelevanceFeedback(feedback) => feedback.validate(),

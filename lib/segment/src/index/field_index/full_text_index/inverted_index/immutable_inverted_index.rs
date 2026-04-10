@@ -28,6 +28,7 @@ pub struct ImmutableInvertedIndex {
     pub(in crate::index::field_index::full_text_index) vocab: HashMap<String, TokenId>,
     pub(in crate::index::field_index::full_text_index) point_to_tokens_count: Vec<usize>,
     pub(in crate::index::field_index::full_text_index) points_count: usize,
+    pub(in crate::index::field_index::full_text_index) total_tokens_count: usize,
 }
 
 impl ImmutableInvertedIndex {
@@ -318,6 +319,7 @@ impl From<MutableInvertedIndex> for ImmutableInvertedIndex {
             postings,
             vocab,
             point_to_tokens,
+            point_to_tokens_count,
             point_to_doc,
             points_count,
         } = index;
@@ -338,12 +340,14 @@ impl From<MutableInvertedIndex> for ImmutableInvertedIndex {
         ImmutableInvertedIndex {
             postings,
             vocab,
+            total_tokens_count: point_to_tokens_count.iter().sum(),
             point_to_tokens_count: point_to_tokens
                 .iter()
-                .map(|tokenset| {
+                .enumerate()
+                .map(|(idx, tokenset)| {
                     tokenset
                         .as_ref()
-                        .map(|tokenset| tokenset.len())
+                        .map(|_| point_to_tokens_count.get(idx).copied().unwrap_or(0))
                         .unwrap_or(0)
                 })
                 .collect(),
@@ -478,6 +482,7 @@ impl From<&MmapInvertedIndex> for ImmutableInvertedIndex {
         ImmutableInvertedIndex {
             postings,
             vocab,
+            total_tokens_count: index.storage.point_to_tokens_count.iter().sum(),
             point_to_tokens_count: index.storage.point_to_tokens_count.to_vec(),
             points_count: index.points_count(),
         }

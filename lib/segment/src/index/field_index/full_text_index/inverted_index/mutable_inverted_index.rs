@@ -14,6 +14,7 @@ pub struct MutableInvertedIndex {
     pub(super) postings: Vec<PostingList>,
     pub vocab: HashMap<String, TokenId>,
     pub(super) point_to_tokens: Vec<Option<TokenSet>>,
+    pub(super) point_to_tokens_count: Vec<usize>,
 
     /// Optional additional structure to store positional information of tokens in the documents.
     ///
@@ -29,6 +30,7 @@ impl MutableInvertedIndex {
             postings: Vec::new(),
             vocab: HashMap::new(),
             point_to_tokens: Vec::new(),
+            point_to_tokens_count: Vec::new(),
             point_to_doc: with_positions.then_some(Vec::new()),
             points_count: 0,
         }
@@ -40,6 +42,18 @@ impl MutableInvertedIndex {
 
     fn get_document(&self, idx: PointOffsetType) -> Option<&Document> {
         self.point_to_doc.as_ref()?.get(idx as usize)?.as_ref()
+    }
+
+    pub fn set_point_tokens_count(&mut self, point_id: PointOffsetType, tokens_count: usize) {
+        let point_id = point_id as usize;
+        if self.point_to_tokens_count.len() <= point_id {
+            self.point_to_tokens_count.resize(point_id + 1, 0);
+        }
+        self.point_to_tokens_count[point_id] = tokens_count;
+    }
+
+    pub fn total_tokens_count(&self) -> usize {
+        self.point_to_tokens_count.iter().sum()
     }
 
     /// Iterate over point ids whose documents contain all given tokens
@@ -136,6 +150,10 @@ impl InvertedIndex for MutableInvertedIndex {
             self.point_to_tokens.resize_with(new_len, Default::default);
         }
 
+        if self.point_to_tokens_count.len() <= point_id as usize {
+            self.point_to_tokens_count.resize(point_id as usize + 1, 0);
+        }
+
         for token_id in tokens.tokens() {
             let token_idx_usize = *token_id as usize;
 
@@ -200,6 +218,7 @@ impl InvertedIndex for MutableInvertedIndex {
         }
 
         self.points_count -= 1;
+        self.point_to_tokens_count[point_id as usize] = 0;
 
         for removed_token in removed_token_set.tokens() {
             // unwrap safety: posting list exists and contains the point idx

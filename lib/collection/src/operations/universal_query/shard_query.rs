@@ -29,7 +29,7 @@ pub fn query_result_order(
             },
             // Score boosting formulas are always have descending order,
             // Euclidean scores can be negated within the formula
-            ScoringQuery::Formula(_formula) => Some(Order::LargeBetter),
+            ScoringQuery::Formula(_) | ScoringQuery::Bm25(_) => Some(Order::LargeBetter),
             ScoringQuery::OrderBy(order_by) => Some(Order::from(order_by.direction())),
             // Random sample does not require ordering
             ScoringQuery::Sample(SampleInternal::Random) => None,

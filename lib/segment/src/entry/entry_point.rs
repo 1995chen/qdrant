@@ -64,6 +64,22 @@ pub trait ReadSegmentEntry: SnapshotEntry {
         hw_counter: &HardwareCounterCell,
     ) -> OperationResult<Vec<ScoredPoint>>;
 
+    #[allow(clippy::too_many_arguments)]
+    fn search_bm25(
+        &self,
+        field: &JsonPath,
+        query: &str,
+        filter: Option<&Filter>,
+        top: usize,
+        score_threshold: Option<f32>,
+        with_payload: &WithPayload,
+        with_vector: &WithVector,
+        hw_counter: &HardwareCounterCell,
+        is_stopped: &AtomicBool,
+        k1: f32,
+        b: f32,
+    ) -> OperationResult<Vec<ScoredPoint>>;
+
     fn vector(
         &self,
         vector_name: &VectorName,

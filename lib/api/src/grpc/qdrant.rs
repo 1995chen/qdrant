@@ -10900,6 +10900,19 @@ pub struct MmrInternal {
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Bm25Internal {
+    #[prost(string, tag = "1")]
+    pub field: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub query: ::prost::alloc::string::String,
+    #[prost(float, tag = "3")]
+    pub k1: f32,
+    #[prost(float, tag = "4")]
+    pub b: f32,
+}
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct QueryShardPoints {
     #[prost(message, repeated, tag = "1")]
     pub prefetch: ::prost::alloc::vec::Vec<query_shard_points::Prefetch>,
@@ -10929,7 +10942,7 @@ pub mod query_shard_points {
     #[allow(clippy::derive_partial_eq_without_eq)]
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct Query {
-        #[prost(oneof = "query::Score", tags = "1, 2, 3, 4, 5, 6, 7")]
+        #[prost(oneof = "query::Score", tags = "1, 2, 3, 4, 5, 6, 7, 8")]
         pub score: ::core::option::Option<query::Score>,
     }
     /// Nested message and enum types in `Query`.
@@ -10959,6 +10972,9 @@ pub mod query_shard_points {
             /// Parameterized RRF fusion
             #[prost(message, tag = "7")]
             Rrf(super::super::Rrf),
+            /// Full-text BM25 scoring
+            #[prost(message, tag = "8")]
+            Bm25(super::super::Bm25Internal),
         }
     }
     #[derive(serde::Serialize)]
