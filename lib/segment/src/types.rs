@@ -909,7 +909,11 @@ pub struct TurboQuantQuantizationConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rotation: Option<TurboQuantRotation>,
 
-    /// Number of Hadamard rotations (only used when rotation is hadamard)
+    /// Chunk size for structured Hadamard mixing.
+    ///
+    /// Must be a power of two. When omitted, TurboQuant uses a default chunk
+    /// size of 128 and applies multiple rounds of chunk-local Hadamard plus
+    /// global permutation mixing.
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hadamard_chunk: Option<usize>,
