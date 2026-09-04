@@ -7999,6 +7999,17 @@
             "description": "Enable HNSW graph building for this payload field. If true, builds additional HNSW links (Need payload_m > 0). Default: true.",
             "type": "boolean",
             "nullable": true
+          },
+          "bm25_config": {
+            "description": "Optional BM25 scoring configuration for this text index.",
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TextIndexBm25Config"
+              },
+              {
+                "nullable": true
+              }
+            ]
           }
         }
       },
@@ -8159,6 +8170,31 @@
         "enum": [
           "none"
         ]
+      },
+      "TextIndexBm25Config": {
+        "type": "object",
+        "properties": {
+          "enable": {
+            "description": "Whether BM25 scoring is enabled.",
+            "type": "boolean",
+            "nullable": true
+          },
+          "k1": {
+            "description": "Term-frequency saturation parameter. Must be finite and greater than or equal to 0. Default: 1.2.",
+            "type": "number",
+            "format": "double",
+            "minimum": 0,
+            "nullable": true
+          },
+          "b": {
+            "description": "Document-length normalization parameter. Must be finite and in the range [0, 1]. Default: 0.75.",
+            "type": "number",
+            "format": "double",
+            "maximum": 1,
+            "minimum": 0,
+            "nullable": true
+          }
+        }
       },
       "BoolIndexParams": {
         "type": "object",
