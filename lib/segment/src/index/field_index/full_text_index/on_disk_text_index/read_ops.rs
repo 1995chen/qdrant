@@ -1,15 +1,20 @@
+use std::sync::atomic::AtomicBool;
+
 use common::counter::hardware_counter::HardwareCounterCell;
-use common::types::PointOffsetType;
+use common::types::{PointOffsetType, ScoredPointOffset};
 use common::universal_io::{UniversalRead, UserData};
 
 use super::super::full_text_index_read::FullTextIndexRead;
-use super::super::inverted_index::{InvertedIndex, ParsedQuery, TokenId};
+use super::super::full_text_index_scoring::FullTextIndexScoring;
+use super::super::inverted_index::{
+    InvertedIndex, InvertedIndexScoring, ParsedQuery, TokenId, bm25_scoring_not_enabled_error,
+};
 use super::super::tokenizers::Tokenizer;
 use super::OnDiskFullTextIndex;
 use crate::common::operation_error::OperationResult;
 use crate::index::field_index::{CardinalityEstimation, PayloadBlockCondition};
 use crate::index::payload_config::StorageType;
-use crate::types::{FieldCondition, PayloadKeyType};
+use crate::types::{FieldCondition, PayloadKeyType, QueryTokenWeightSet};
 
 impl<S: UniversalRead> FullTextIndexRead for OnDiskFullTextIndex<S> {
     fn tokenizer(&self) -> &Tokenizer {
@@ -22,6 +27,14 @@ impl<S: UniversalRead> FullTextIndexRead for OnDiskFullTextIndex<S> {
 
     fn points_count(&self) -> usize {
         self.inverted_index.points_count()
+    }
+
+    fn document_length(
+        &self,
+        point_id: PointOffsetType,
+        hw_counter: &HardwareCounterCell,
+    ) -> OperationResult<Option<u32>> {
+        self.inverted_index.document_length(point_id, hw_counter)
     }
 
     fn values_count(&self, point_id: PointOffsetType) -> usize {
@@ -39,6 +52,14 @@ impl<S: UniversalRead> FullTextIndexRead for OnDiskFullTextIndex<S> {
         f: impl FnMut(U, Option<TokenId>),
     ) -> OperationResult<()> {
         self.inverted_index.for_each_token_id(iter, hw_counter, f)
+    }
+
+    fn get_posting_len(
+        &self,
+        token_id: TokenId,
+        hw_counter: &HardwareCounterCell,
+    ) -> OperationResult<Option<usize>> {
+        self.inverted_index.get_posting_len(token_id, hw_counter)
     }
 
     fn filter_query<'a>(
@@ -93,5 +114,50 @@ impl<S: UniversalRead> FullTextIndexRead for OnDiskFullTextIndex<S> {
 
     fn is_on_disk(&self) -> bool {
         true
+    }
+}
+
+impl<S: UniversalRead> FullTextIndexScoring for OnDiskFullTextIndex<S> {
+    fn search_text_index<F>(
+        &self,
+        query: &QueryTokenWeightSet,
+        top: usize,
+        is_stopped: &AtomicBool,
+        filter: F,
+    ) -> OperationResult<Vec<ScoredPointOffset>>
+    where
+        F: Fn(PointOffsetType) -> bool,
+    {
+        if top == 0 {
+            return Ok(Vec::new());
+        }
+        self.inverted_index.search_text_index(
+            query,
+            self.bm25_params
+                .ok_or_else(bm25_scoring_not_enabled_error)?,
+            top,
+            is_stopped,
+            filter,
+        )
+    }
+
+    fn search_text_index_plain(
+        &self,
+        query: &QueryTokenWeightSet,
+        top: usize,
+        ordered_prefiltered_points: &[PointOffsetType],
+        is_stopped: &AtomicBool,
+    ) -> OperationResult<Vec<ScoredPointOffset>> {
+        if top == 0 {
+            return Ok(Vec::new());
+        }
+        self.inverted_index.search_text_index_plain(
+            query,
+            self.bm25_params
+                .ok_or_else(bm25_scoring_not_enabled_error)?,
+            top,
+            ordered_prefiltered_points,
+            is_stopped,
+        )
     }
 }

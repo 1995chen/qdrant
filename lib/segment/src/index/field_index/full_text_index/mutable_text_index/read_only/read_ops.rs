@@ -1,15 +1,18 @@
+use std::sync::atomic::AtomicBool;
+
 use common::counter::hardware_counter::HardwareCounterCell;
-use common::types::PointOffsetType;
+use common::types::{PointOffsetType, ScoredPointOffset};
 use common::universal_io::{UniversalRead, UserData};
 
 use super::super::super::full_text_index_read::FullTextIndexRead;
+use super::super::super::full_text_index_scoring::FullTextIndexScoring;
 use super::super::super::inverted_index::{ParsedQuery, TokenId};
 use super::super::super::tokenizers::Tokenizer;
 use super::ReadOnlyAppendableFullTextIndex;
 use crate::common::operation_error::OperationResult;
 use crate::index::field_index::{CardinalityEstimation, PayloadBlockCondition};
 use crate::index::payload_config::StorageType;
-use crate::types::{FieldCondition, PayloadKeyType};
+use crate::types::{FieldCondition, PayloadKeyType, QueryTokenWeightSet};
 
 impl<S: UniversalRead> FullTextIndexRead for ReadOnlyAppendableFullTextIndex<S> {
     fn tokenizer(&self) -> &Tokenizer {
@@ -22,6 +25,14 @@ impl<S: UniversalRead> FullTextIndexRead for ReadOnlyAppendableFullTextIndex<S> 
 
     fn points_count(&self) -> usize {
         self.inner.points_count()
+    }
+
+    fn document_length(
+        &self,
+        point_id: PointOffsetType,
+        hw_counter: &HardwareCounterCell,
+    ) -> OperationResult<Option<u32>> {
+        self.inner.document_length(point_id, hw_counter)
     }
 
     fn values_count(&self, point_id: PointOffsetType) -> usize {
@@ -39,6 +50,14 @@ impl<S: UniversalRead> FullTextIndexRead for ReadOnlyAppendableFullTextIndex<S> 
         f: impl FnMut(U, Option<TokenId>),
     ) -> OperationResult<()> {
         self.inner.for_each_token_id(iter, hw_counter, f)
+    }
+
+    fn get_posting_len(
+        &self,
+        token_id: TokenId,
+        hw_counter: &HardwareCounterCell,
+    ) -> OperationResult<Option<usize>> {
+        self.inner.get_posting_len(token_id, hw_counter)
     }
 
     fn filter_query<'a>(
@@ -93,5 +112,31 @@ impl<S: UniversalRead> FullTextIndexRead for ReadOnlyAppendableFullTextIndex<S> 
 
     fn is_on_disk(&self) -> bool {
         self.inner.is_on_disk()
+    }
+}
+
+impl<S: UniversalRead> FullTextIndexScoring for ReadOnlyAppendableFullTextIndex<S> {
+    fn search_text_index<F>(
+        &self,
+        query: &QueryTokenWeightSet,
+        top: usize,
+        is_stopped: &AtomicBool,
+        filter: F,
+    ) -> OperationResult<Vec<ScoredPointOffset>>
+    where
+        F: Fn(PointOffsetType) -> bool,
+    {
+        self.inner.search_text_index(query, top, is_stopped, filter)
+    }
+
+    fn search_text_index_plain(
+        &self,
+        query: &QueryTokenWeightSet,
+        top: usize,
+        ordered_prefiltered_points: &[PointOffsetType],
+        is_stopped: &AtomicBool,
+    ) -> OperationResult<Vec<ScoredPointOffset>> {
+        self.inner
+            .search_text_index_plain(query, top, ordered_prefiltered_points, is_stopped)
     }
 }

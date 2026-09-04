@@ -1,14 +1,17 @@
+use std::sync::atomic::AtomicBool;
+
 use common::condition_checker::{
     CheckItem, ConditionChecker, ConstantConditionChecker, Partitioner, Rest, Select,
 };
 use common::counter::hardware_accumulator::HwMeasurementAcc;
 use common::counter::hardware_counter::HardwareCounterCell;
-use common::types::PointOffsetType;
+use common::types::{PointOffsetType, ScoredPointOffset};
 use common::universal_io::UserData;
 use serde_json::Value;
 
 use super::FullTextIndex;
 use super::full_text_index_read::{FullTextIndexRead, PayloadMatchQueryType};
+use super::full_text_index_scoring::FullTextIndexScoring;
 use super::inverted_index::{ParsedQuery, TokenId};
 use super::tokenizers::Tokenizer;
 use crate::common::operation_error::{OperationError, OperationResult};
@@ -19,7 +22,7 @@ use crate::index::field_index::{
 use crate::index::payload_config::StorageType;
 use crate::types::{
     FieldCondition, Match, MatchAny, MatchExcept, MatchPhrase, MatchPrefix, MatchText,
-    MatchTextAny, MatchValue, PayloadKeyType,
+    MatchTextAny, MatchValue, PayloadKeyType, QueryTokenWeightSet,
 };
 
 impl FullTextIndexRead for FullTextIndex {
@@ -44,6 +47,18 @@ impl FullTextIndexRead for FullTextIndex {
             Self::Mutable(index) => index.points_count(),
             Self::Immutable(index) => index.points_count(),
             Self::OnDisk(index) => index.points_count(),
+        }
+    }
+
+    fn document_length(
+        &self,
+        point_id: PointOffsetType,
+        hw_counter: &HardwareCounterCell,
+    ) -> OperationResult<Option<u32>> {
+        match self {
+            Self::Mutable(index) => index.document_length(point_id, hw_counter),
+            Self::Immutable(index) => index.document_length(point_id, hw_counter),
+            Self::OnDisk(index) => index.document_length(point_id, hw_counter),
         }
     }
 
@@ -73,6 +88,18 @@ impl FullTextIndexRead for FullTextIndex {
             Self::Mutable(index) => index.for_each_token_id(iter, hw_counter, f),
             Self::Immutable(index) => index.for_each_token_id(iter, hw_counter, f),
             Self::OnDisk(index) => index.for_each_token_id(iter, hw_counter, f),
+        }
+    }
+
+    fn get_posting_len(
+        &self,
+        token_id: TokenId,
+        hw_counter: &HardwareCounterCell,
+    ) -> OperationResult<Option<usize>> {
+        match self {
+            Self::Mutable(index) => index.get_posting_len(token_id, hw_counter),
+            Self::Immutable(index) => index.get_posting_len(token_id, hw_counter),
+            Self::OnDisk(index) => index.get_posting_len(token_id, hw_counter),
         }
     }
 
@@ -158,6 +185,45 @@ impl FullTextIndexRead for FullTextIndex {
             Self::Mutable(index) => FullTextIndexRead::is_on_disk(index),
             Self::Immutable(index) => FullTextIndexRead::is_on_disk(index),
             Self::OnDisk(index) => FullTextIndexRead::is_on_disk(index),
+        }
+    }
+}
+
+impl FullTextIndexScoring for FullTextIndex {
+    fn search_text_index<F>(
+        &self,
+        query: &QueryTokenWeightSet,
+        top: usize,
+        is_stopped: &AtomicBool,
+        filter: F,
+    ) -> OperationResult<Vec<ScoredPointOffset>>
+    where
+        F: Fn(PointOffsetType) -> bool,
+    {
+        match self {
+            Self::Mutable(index) => index.search_text_index(query, top, is_stopped, filter),
+            Self::Immutable(index) => index.search_text_index(query, top, is_stopped, filter),
+            Self::OnDisk(index) => index.search_text_index(query, top, is_stopped, filter),
+        }
+    }
+
+    fn search_text_index_plain(
+        &self,
+        query: &QueryTokenWeightSet,
+        top: usize,
+        ordered_prefiltered_points: &[PointOffsetType],
+        is_stopped: &AtomicBool,
+    ) -> OperationResult<Vec<ScoredPointOffset>> {
+        match self {
+            Self::Mutable(index) => {
+                index.search_text_index_plain(query, top, ordered_prefiltered_points, is_stopped)
+            }
+            Self::Immutable(index) => {
+                index.search_text_index_plain(query, top, ordered_prefiltered_points, is_stopped)
+            }
+            Self::OnDisk(index) => {
+                index.search_text_index_plain(query, top, ordered_prefiltered_points, is_stopped)
+            }
         }
     }
 }

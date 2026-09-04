@@ -682,16 +682,16 @@ pub struct SearchParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acorn: Option<AcornSearchParams>,
 
-    /// Which population sparse vector IDF statistics are computed over.
+    /// Which population IDF statistics are computed over.
     /// By default (or with explicit `"global"`) statistics are collection-wide.
-    /// Only applicable to sparse vectors with the IDF modifier enabled.
+    /// Applicable to sparse vectors with the IDF modifier enabled and BM25 payload text queries.
     #[serde(default)]
     #[validate(nested)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idf: Option<IdfParams>,
 }
 
-/// Population over which sparse vector IDF statistics are computed for scoring —
+/// Population over which IDF statistics are computed for scoring —
 /// the *IDF corpus*.
 ///
 /// - `"global"` — collection-wide statistics, same as omitting the parameter.
@@ -2741,7 +2741,7 @@ impl Validate for PayloadSchemaParams {
             PayloadSchemaParams::Integer(integer_index_params) => integer_index_params.validate(),
             PayloadSchemaParams::Float(_) => Ok(()),
             PayloadSchemaParams::Geo(_) => Ok(()),
-            PayloadSchemaParams::Text(_) => Ok(()),
+            PayloadSchemaParams::Text(text_index_params) => text_index_params.validate(),
             PayloadSchemaParams::Bool(_) => Ok(()),
             PayloadSchemaParams::Datetime(_) => Ok(()),
             PayloadSchemaParams::Uuid(_) => Ok(()),
@@ -4707,6 +4707,56 @@ pub enum SnapshotFormat {
     /// └── …
     /// ```
     Streamable,
+}
+
+/// A token and its inverse-document-frequency contribution for text scoring.
+#[derive(Clone, Debug, Default)]
+pub struct QueryTokenWeight {
+    token: String,
+    idf: f32,
+}
+
+impl QueryTokenWeight {
+    pub fn new(token: String, idf: f32) -> Self {
+        Self { token, idf }
+    }
+
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    pub fn idf(&self) -> f32 {
+        self.idf
+    }
+}
+
+/// Token weights resolved before searching individual full-text indexes.
+#[derive(Clone, Debug, Default)]
+pub struct QueryTokenWeightSet {
+    query_tokens: Vec<QueryTokenWeight>,
+    average_document_length: Option<f64>,
+}
+
+impl QueryTokenWeightSet {
+    pub fn new(query_tokens: Vec<QueryTokenWeight>) -> Self {
+        Self {
+            query_tokens,
+            average_document_length: None,
+        }
+    }
+
+    pub fn with_average_document_length(mut self, average_document_length: f64) -> Self {
+        self.average_document_length = Some(average_document_length);
+        self
+    }
+
+    pub fn query_tokens(&self) -> &[QueryTokenWeight] {
+        &self.query_tokens
+    }
+
+    pub fn average_document_length(&self) -> Option<f64> {
+        self.average_document_length
+    }
 }
 
 #[cfg(test)]

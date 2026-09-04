@@ -1,38 +1,55 @@
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 
 use common::counter::hardware_counter::HardwareCounterCell;
-use common::types::PointOffsetType;
+use common::types::{PointOffsetType, ScoredPointOffset};
 use common::universal_io::UserData;
 use itertools::Either;
 
-use super::posting_list::PostingList;
+use super::posting_list::{FrequencyPostingElement, PostingList};
 use super::postings_iterator::{intersect_postings_iterator, merge_postings_iterator};
-use super::{Document, InvertedIndex, ParsedQuery, TokenId, TokenSet};
-use crate::common::operation_error::OperationResult;
+use super::scoring::{
+    Bm25SearchContext, ExactDocumentLengths, IndexedBm25Posting, MutableBm25PostingListIter,
+};
+use super::{
+    Bm25Params, Bm25State, Document, InvertedIndex, InvertedIndexScoring, MutableBm25State,
+    ParsedQuery, TokenFrequencyMap, TokenId, TokenSet, bm25_scoring_not_enabled_error,
+};
+use crate::common::operation_error::{OperationError, OperationResult};
+use crate::index::field_index::full_text_index::full_text_index_scoring::FullTextSearchScratchPool;
+use crate::types::QueryTokenWeightSet;
 
 #[cfg_attr(test, derive(Clone))]
 pub struct MutableInvertedIndex {
     pub(super) postings: Vec<PostingList>,
     pub vocab: HashMap<String, TokenId>,
     pub(super) point_to_tokens: Vec<Option<TokenSet>>,
+    pub(super) bm25: Option<MutableBm25State>,
 
     /// Optional additional structure to store positional information of tokens in the documents.
     ///
     /// Must be enabled explicitly.
     pub point_to_doc: Option<Vec<Option<Document>>>,
     pub(super) points_count: usize,
+    pub(super) search_scratch_pool: FullTextSearchScratchPool,
 }
 
 impl MutableInvertedIndex {
     /// Create a new inverted index with or without positional information.
-    pub fn new(with_positions: bool) -> Self {
+    pub fn new(with_positions: bool, with_frequencies: bool) -> Self {
         Self {
             postings: Vec::new(),
             vocab: HashMap::new(),
             point_to_tokens: Vec::new(),
+            bm25: with_frequencies.then(Bm25State::default),
             point_to_doc: with_positions.then_some(Vec::new()),
             points_count: 0,
+            search_scratch_pool: FullTextSearchScratchPool::new(),
         }
+    }
+
+    pub(in crate::index::field_index::full_text_index) fn has_frequencies(&self) -> bool {
+        self.bm25.is_some()
     }
 
     fn get_tokens(&self, idx: PointOffsetType) -> Option<&TokenSet> {
@@ -108,6 +125,54 @@ impl MutableInvertedIndex {
 
         Box::new(iter)
     }
+
+    pub(in crate::index::field_index::full_text_index) fn index_token_frequencies(
+        &mut self,
+        point_id: PointOffsetType,
+        token_frequencies: TokenFrequencyMap,
+        hw_counter: &HardwareCounterCell,
+    ) -> OperationResult<()> {
+        let Some(bm25) = self.bm25.as_mut() else {
+            return Err(OperationError::service_error(
+                "cannot add term frequencies to an ID-only inverted index",
+            ));
+        };
+
+        self.points_count += 1;
+        let mut hw_cell_wb = hw_counter
+            .payload_index_io_write_counter()
+            .write_back_counter();
+
+        if self.point_to_tokens.len() <= point_id as usize {
+            let new_len = point_id as usize + 1;
+            hw_cell_wb
+                .incr_delta((new_len - self.point_to_tokens.len()) * size_of::<Option<TokenSet>>());
+            self.point_to_tokens.resize_with(new_len, Default::default);
+
+            let document_lengths = &mut bm25.document_lengths;
+            hw_cell_wb.incr_delta((new_len - document_lengths.len()) * size_of::<u32>());
+            document_lengths.resize(new_len, 0);
+        }
+
+        for (token_id, term_frequency) in token_frequencies.iter() {
+            let token_idx = token_id as usize;
+            if self.postings.len() <= token_idx {
+                let new_len = token_idx + 1;
+                hw_cell_wb.incr_delta((new_len - self.postings.len()) * size_of::<PostingList>());
+                self.postings
+                    .resize_with(new_len, || PostingList::new(true));
+            }
+
+            hw_cell_wb.incr_delta(size_of::<FrequencyPostingElement>());
+            self.postings[token_idx].insert_frequency(point_id, term_frequency);
+        }
+
+        let document_length = token_frequencies.document_length();
+        bm25.document_lengths[point_id as usize] = document_length;
+        bm25.stats.add_document(document_length);
+        self.point_to_tokens[point_id as usize] = Some(token_frequencies.tokens_set());
+        Ok(())
+    }
 }
 
 impl InvertedIndex for MutableInvertedIndex {
@@ -121,6 +186,11 @@ impl InvertedIndex for MutableInvertedIndex {
         tokens: TokenSet,
         hw_counter: &HardwareCounterCell,
     ) -> OperationResult<()> {
+        if self.has_frequencies() {
+            return Err(OperationError::service_error(
+                "cannot add ID-only tokens to a frequency inverted index",
+            ));
+        }
         self.points_count += 1;
 
         let mut hw_cell_wb = hw_counter
@@ -198,6 +268,11 @@ impl InvertedIndex for MutableInvertedIndex {
 
         if let Some(point_to_doc) = &mut self.point_to_doc {
             point_to_doc[point_id as usize] = None;
+        }
+
+        if let Some(bm25) = &mut self.bm25 {
+            let document_length = std::mem::take(&mut bm25.document_lengths[point_id as usize]);
+            bm25.stats.remove_document(document_length);
         }
 
         self.points_count -= 1;
@@ -290,6 +365,17 @@ impl InvertedIndex for MutableInvertedIndex {
         self.points_count
     }
 
+    fn document_length(
+        &self,
+        point_id: PointOffsetType,
+        _hw_counter: &HardwareCounterCell,
+    ) -> OperationResult<Option<u32>> {
+        Ok(self
+            .bm25
+            .as_ref()
+            .and_then(|bm25| bm25.document_lengths.get(point_id as usize).copied()))
+    }
+
     fn for_each_token_id<'a, U: UserData>(
         &self,
         tokens: impl Iterator<Item = (U, &'a str)>,
@@ -301,6 +387,90 @@ impl InvertedIndex for MutableInvertedIndex {
     }
 }
 
+impl InvertedIndexScoring for MutableInvertedIndex {
+    fn search_text_index_plain(
+        &self,
+        query: &QueryTokenWeightSet,
+        params: Bm25Params,
+        top: usize,
+        ordered_prefiltered_points: &[PointOffsetType],
+        is_stopped: &AtomicBool,
+    ) -> OperationResult<Vec<ScoredPointOffset>> {
+        if top == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(context) = self.scoring_context(query, params, top, is_stopped)? else {
+            return Ok(Vec::new());
+        };
+        context.plain_search(
+            &self.search_scratch_pool,
+            ordered_prefiltered_points,
+            |_| true,
+        )
+    }
+
+    fn search_text_index<F>(
+        &self,
+        query: &QueryTokenWeightSet,
+        params: Bm25Params,
+        top: usize,
+        is_stopped: &AtomicBool,
+        filter: F,
+    ) -> OperationResult<Vec<ScoredPointOffset>>
+    where
+        F: Fn(PointOffsetType) -> bool,
+    {
+        if top == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(context) = self.scoring_context(query, params, top, is_stopped)? else {
+            return Ok(Vec::new());
+        };
+        context.search(&self.search_scratch_pool, filter)
+    }
+}
+
+impl MutableInvertedIndex {
+    fn scoring_context<'a>(
+        &'a self,
+        query: &QueryTokenWeightSet,
+        params: Bm25Params,
+        top: usize,
+        is_stopped: &'a AtomicBool,
+    ) -> OperationResult<
+        Option<Bm25SearchContext<'a, MutableBm25PostingListIter<'a>, ExactDocumentLengths<'a>>>,
+    > {
+        let Some(bm25) = &self.bm25 else {
+            return Err(bm25_scoring_not_enabled_error());
+        };
+        let mut resolved = query
+            .query_tokens()
+            .iter()
+            .filter_map(|query_token| {
+                let token_id = *self.vocab.get(query_token.token())?;
+                let posting = self.postings.get(token_id as usize)?;
+                Some((token_id, posting.frequencies()?, query_token.idf()))
+            })
+            .collect::<Vec<_>>();
+        resolved.sort_unstable_by_key(|(token_id, _, _)| *token_id);
+        let postings = resolved
+            .into_iter()
+            .map(|(_, elements, idf)| {
+                IndexedBm25Posting::new(MutableBm25PostingListIter::new(elements), idf)
+            })
+            .collect();
+        Ok(Bm25SearchContext::new(
+            postings,
+            ExactDocumentLengths(&bm25.document_lengths),
+            params,
+            bm25.stats,
+            query.average_document_length(),
+            top,
+            is_stopped,
+        ))
+    }
+}
+
 impl MutableInvertedIndex {
     /// Approximate RAM usage in bytes.
     pub fn ram_usage_bytes(&self) -> usize {
@@ -308,8 +478,10 @@ impl MutableInvertedIndex {
             postings,
             vocab,
             point_to_tokens,
+            bm25,
             point_to_doc,
             points_count: _,
+            search_scratch_pool: _,
         } = self;
 
         let postings_bytes: usize = postings.capacity() * std::mem::size_of::<PostingList>()
@@ -339,6 +511,14 @@ impl MutableInvertedIndex {
                         .sum::<usize>()
             })
             .unwrap_or(0);
-        postings_bytes + vocab_base_bytes + vocab_heap_bytes + ptt_bytes + ptd_bytes
+        let document_lengths_bytes = bm25.as_ref().map_or(0, |bm25| {
+            bm25.document_lengths.capacity() * size_of::<u32>()
+        });
+        postings_bytes
+            + vocab_base_bytes
+            + vocab_heap_bytes
+            + ptt_bytes
+            + ptd_bytes
+            + document_lengths_bytes
     }
 }

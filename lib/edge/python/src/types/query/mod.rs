@@ -9,6 +9,7 @@ use ordered_float::OrderedFloat;
 use pyo3::prelude::*;
 use segment::data_types::vectors::{NamedQuery, VectorInternal};
 use segment::vector_storage::query::*;
+use shard::query::payload_query::TextQueryInternal;
 use shard::query::query_enum::QueryEnum;
 
 pub use self::with_payload::*;
@@ -60,6 +61,12 @@ impl FromPyObject<'_, '_> for PyQuery {
                     using,
                 })
             }
+
+            PyQueryInterface::Text { key, query } => QueryEnum::Text(TextQueryInternal {
+                key: key.0,
+                query_str: query,
+                resolved: None,
+            }),
         };
 
         Ok(Self(query))
@@ -108,6 +115,10 @@ impl<'py> IntoPyObject<'py> for PyQuery {
                     using,
                 }
             }
+            QueryEnum::Text(TextQueryInternal { key, query_str, .. }) => PyQueryInterface::Text {
+                key: PyJsonPath(key),
+                query: query_str,
+            },
         };
 
         Bound::new(py, query)
@@ -126,6 +137,12 @@ impl<'py> IntoPyObject<'py> for &PyQuery {
 
 impl Repr for PyQuery {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        if let QueryEnum::Text(TextQueryInternal { key, query_str, .. }) = &self.0 {
+            return f.complex_enum::<PyQueryInterface>(
+                "Text",
+                &[("key", PyJsonPath::wrap_ref(key)), ("query", query_str)],
+            );
+        }
         let (repr, query, using): (_, &dyn Repr, _) = match &self.0 {
             QueryEnum::Nearest(NamedQuery { query, using }) => {
                 ("Nearest", PyNamedVectorInternal::wrap_ref(query), using)
@@ -151,6 +168,7 @@ impl Repr for PyQuery {
                 PyFeedbackNaiveQuery::wrap_ref(query),
                 using,
             ),
+            QueryEnum::Text(_) => unreachable!("handled above"),
         };
 
         f.complex_enum::<PyQueryInterface>(repr, &[("query", query), ("using", using)])
@@ -195,6 +213,9 @@ pub enum PyQueryInterface {
         query: PyFeedbackNaiveQuery,
         using: Option<String>,
     },
+
+    #[pyo3(constructor = (key, query))]
+    Text { key: PyJsonPath, query: String },
 }
 
 #[pymethods]
@@ -206,6 +227,9 @@ impl PyQueryInterface {
 
 impl Repr for PyQueryInterface {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        if let PyQueryInterface::Text { key, query } = self {
+            return f.complex_enum::<Self>("Text", &[("key", key), ("query", query)]);
+        }
         let (repr, query, using): (_, &dyn Repr, _) = match self {
             PyQueryInterface::Nearest { query, using } => ("Nearest", query, using),
             PyQueryInterface::RecommendBestScore { query, using } => {
@@ -217,6 +241,7 @@ impl Repr for PyQueryInterface {
             PyQueryInterface::Discover { query, using } => ("Discover", query, using),
             PyQueryInterface::Context { query, using } => ("Context", query, using),
             PyQueryInterface::FeedbackNaive { query, using } => ("FeedbackNaive", query, using),
+            PyQueryInterface::Text { .. } => unreachable!("handled above"),
         };
 
         f.complex_enum::<Self>(repr, &[("query", query), ("using", using)])

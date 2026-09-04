@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::sync::atomic::AtomicBool;
 
 use ahash::AHashMap;
 use common::counter::hardware_counter::HardwareCounterCell;
-use common::types::PointOffsetType;
+use common::types::{PointOffsetType, ScoredPointOffset};
 use common::universal_io::UserData;
 use itertools::Either;
 use posting_list::{PostingBuilder, PostingList, PostingListView, PostingValue};
 
 use super::immutable_postings_enum::ImmutablePostings;
+use super::length_norm::EncodedDocumentLength;
 use super::mutable_inverted_index::MutableInvertedIndex;
 use super::on_disk_inverted_index::OnDiskInvertedIndex;
 use super::on_disk_inverted_index::on_disk_postings_enum::OnDiskPostingsEnum;
@@ -16,11 +18,50 @@ use super::positions::Positions;
 use super::postings_iterator::{
     intersect_compressed_postings_iterator, merge_compressed_postings_iterator,
 };
-use super::{Document, InvertedIndex, ParsedQuery, TokenId, TokenSet};
+use super::scoring::{
+    Bm25SearchContext, Bm25SearchOptions, CompressedBm25PostingListIter,
+    InMemoryEncodedDocumentLengths, IndexedBm25Posting,
+};
+use super::term_frequency::TermFrequency;
+use super::term_frequency_and_positions::TermFrequencyAndPositions;
+use super::{
+    Bm25Params, Document, InvertedIndex, InvertedIndexScoring, ParsedQuery,
+    TermFrequencyPostingValue, TokenId, TokenSet, bm25_scoring_not_enabled_error,
+};
 use crate::common::operation_error::{OperationError, OperationResult};
+use crate::index::field_index::full_text_index::full_text_index_scoring::FullTextSearchScratchPool;
 use crate::index::field_index::full_text_index::inverted_index::postings_iterator::{
     check_compressed_postings_phrase, intersect_compressed_postings_phrase_iterator,
 };
+use crate::types::QueryTokenWeightSet;
+
+fn scoring_postings<'a, V: TermFrequencyPostingValue>(
+    postings: &'a [PostingList<V>],
+    vocab: &HashMap<String, TokenId>,
+    query: &QueryTokenWeightSet,
+) -> Vec<IndexedBm25Posting<CompressedBm25PostingListIter<'a, V>>> {
+    let mut resolved = query
+        .query_tokens()
+        .iter()
+        .filter_map(|query_token| {
+            let token_id = *vocab.get(query_token.token())?;
+            let posting = postings.get(token_id as usize)?;
+            let view = posting.view();
+            let last_id = view.components().last_id.map(|id| id.get());
+            Some((token_id, view, last_id, query_token.idf()))
+        })
+        .collect::<Vec<_>>();
+    resolved.sort_unstable_by_key(|(token_id, _, _, _)| *token_id);
+    resolved
+        .into_iter()
+        .map(|(_, view, last_id, idf)| {
+            IndexedBm25Posting::new(
+                CompressedBm25PostingListIter::new(view.into_iter(), last_id),
+                idf,
+            )
+        })
+        .collect()
+}
 
 /// Collect posting-list views for every token in `token_ids`.
 /// Returns `None` as soon as any token id is out of range.
@@ -45,6 +86,8 @@ pub struct ImmutableInvertedIndex {
     pub(in crate::index::field_index::full_text_index) vocab: HashMap<String, TokenId>,
     pub(in crate::index::field_index::full_text_index) point_to_tokens_count: Vec<usize>,
     pub(in crate::index::field_index::full_text_index) points_count: usize,
+    pub(in crate::index::field_index::full_text_index) bm25: Option<super::ImmutableBm25State>,
+    pub(super) search_scratch_pool: FullTextSearchScratchPool,
 }
 
 impl ImmutableInvertedIndex {
@@ -52,7 +95,7 @@ impl ImmutableInvertedIndex {
     fn filter_has_all<'a>(
         &'a self,
         tokens: TokenSet,
-    ) -> impl Iterator<Item = PointOffsetType> + 'a {
+    ) -> Box<dyn Iterator<Item = PointOffsetType> + 'a> {
         // in case of immutable index, deleted documents are still in the postings
         let filter = move |idx| {
             self.point_to_tokens_count
@@ -85,11 +128,15 @@ impl ImmutableInvertedIndex {
         }
 
         match &self.postings {
-            ImmutablePostings::Ids(postings) => {
-                Either::Left(intersection(postings, tokens, filter))
-            }
+            ImmutablePostings::Ids(postings) => Box::new(intersection(postings, tokens, filter)),
             ImmutablePostings::WithPositions(postings) => {
-                Either::Right(intersection(postings, tokens, filter))
+                Box::new(intersection(postings, tokens, filter))
+            }
+            ImmutablePostings::WithFrequencies(postings) => {
+                Box::new(intersection(postings, tokens, filter))
+            }
+            ImmutablePostings::WithFrequenciesAndPositions(postings) => {
+                Box::new(intersection(postings, tokens, filter))
             }
         }
     }
@@ -98,7 +145,7 @@ impl ImmutableInvertedIndex {
     fn filter_has_any<'a>(
         &'a self,
         tokens: TokenSet,
-    ) -> impl Iterator<Item = PointOffsetType> + 'a {
+    ) -> Box<dyn Iterator<Item = PointOffsetType> + 'a> {
         // in case of immutable index, deleted documents are still in the postings
         let is_active = move |idx| {
             self.point_to_tokens_count
@@ -126,9 +173,15 @@ impl ImmutableInvertedIndex {
         }
 
         match &self.postings {
-            ImmutablePostings::Ids(postings) => Either::Left(merge(postings, tokens, is_active)),
+            ImmutablePostings::Ids(postings) => Box::new(merge(postings, tokens, is_active)),
             ImmutablePostings::WithPositions(postings) => {
-                Either::Right(merge(postings, tokens, is_active))
+                Box::new(merge(postings, tokens, is_active))
+            }
+            ImmutablePostings::WithFrequencies(postings) => {
+                Box::new(merge(postings, tokens, is_active))
+            }
+            ImmutablePostings::WithFrequenciesAndPositions(postings) => {
+                Box::new(merge(postings, tokens, is_active))
             }
         }
     }
@@ -160,6 +213,12 @@ impl ImmutableInvertedIndex {
             ImmutablePostings::WithPositions(postings) => {
                 check_intersection(postings, tokens, point_id)
             }
+            ImmutablePostings::WithFrequencies(postings) => {
+                check_intersection(postings, tokens, point_id)
+            }
+            ImmutablePostings::WithFrequenciesAndPositions(postings) => {
+                check_intersection(postings, tokens, point_id)
+            }
         }
     }
 
@@ -188,6 +247,10 @@ impl ImmutableInvertedIndex {
         match &self.postings {
             ImmutablePostings::Ids(postings) => check_any(postings, tokens, point_id),
             ImmutablePostings::WithPositions(postings) => check_any(postings, tokens, point_id),
+            ImmutablePostings::WithFrequencies(postings) => check_any(postings, tokens, point_id),
+            ImmutablePostings::WithFrequenciesAndPositions(postings) => {
+                check_any(postings, tokens, point_id)
+            }
         }
     }
 
@@ -195,7 +258,7 @@ impl ImmutableInvertedIndex {
     pub fn filter_has_phrase<'a>(
         &'a self,
         phrase: Document,
-    ) -> impl Iterator<Item = PointOffsetType> + 'a {
+    ) -> Box<dyn Iterator<Item = PointOffsetType> + 'a> {
         // in case of mmap immutable index, deleted points are still in the postings
         let is_active = move |idx| {
             self.point_to_tokens_count
@@ -210,17 +273,31 @@ impl ImmutableInvertedIndex {
                 // added twice in `phrase_in_all_postings`.
                 let unique_tokens = phrase.to_token_set();
                 if let Some(selected_postings) = get_all_or_none(postings, unique_tokens.tokens()) {
-                    Either::Right(intersect_compressed_postings_phrase_iterator(
+                    Box::new(intersect_compressed_postings_phrase_iterator(
                         phrase,
                         selected_postings,
                         is_active,
                     ))
                 } else {
-                    Either::Left(std::iter::empty())
+                    Box::new(std::iter::empty())
+                }
+            }
+            ImmutablePostings::WithFrequenciesAndPositions(postings) => {
+                let unique_tokens = phrase.to_token_set();
+                if let Some(selected_postings) = get_all_or_none(postings, unique_tokens.tokens()) {
+                    Box::new(intersect_compressed_postings_phrase_iterator(
+                        phrase,
+                        selected_postings,
+                        is_active,
+                    ))
+                } else {
+                    Box::new(std::iter::empty())
                 }
             }
             // cannot do phrase matching if there's no positional information
-            ImmutablePostings::Ids(_postings) => Either::Left(std::iter::empty()),
+            ImmutablePostings::Ids(_) | ImmutablePostings::WithFrequencies(_) => {
+                Box::new(std::iter::empty())
+            }
         }
     }
 
@@ -243,10 +320,19 @@ impl ImmutableInvertedIndex {
                     return false;
                 };
 
-                check_compressed_postings_phrase(phrase, point_id, selected_postings)
+                check_compressed_postings_phrase(phrase, point_id, &selected_postings)
+            }
+            ImmutablePostings::WithFrequenciesAndPositions(postings) => {
+                let unique_tokens = phrase.to_token_set();
+                let Some(selected_postings) = get_all_or_none(postings, unique_tokens.tokens())
+                else {
+                    return false;
+                };
+
+                check_compressed_postings_phrase(phrase, point_id, &selected_postings)
             }
             // cannot do phrase matching if there's no positional information
-            ImmutablePostings::Ids(_postings) => false,
+            ImmutablePostings::Ids(_) | ImmutablePostings::WithFrequencies(_) => false,
         }
     }
 }
@@ -293,9 +379,9 @@ impl InvertedIndex for ImmutableInvertedIndex {
         _hw_counter: &'a HardwareCounterCell,
     ) -> OperationResult<Box<dyn Iterator<Item = PointOffsetType> + 'a>> {
         match query {
-            ParsedQuery::AllTokens(tokens) => Ok(Box::new(self.filter_has_all(tokens))),
-            ParsedQuery::Phrase(tokens) => Ok(Box::new(self.filter_has_phrase(tokens))),
-            ParsedQuery::AnyTokens(tokens) => Ok(Box::new(self.filter_has_any(tokens))),
+            ParsedQuery::AllTokens(tokens) => Ok(self.filter_has_all(tokens)),
+            ParsedQuery::Phrase(tokens) => Ok(self.filter_has_phrase(tokens)),
+            ParsedQuery::AnyTokens(tokens) => Ok(self.filter_has_any(tokens)),
         }
     }
 
@@ -349,6 +435,19 @@ impl InvertedIndex for ImmutableInvertedIndex {
         self.points_count
     }
 
+    fn document_length(
+        &self,
+        point_id: PointOffsetType,
+        _hw_counter: &HardwareCounterCell,
+    ) -> OperationResult<Option<u32>> {
+        Ok(self.bm25.as_ref().and_then(|bm25| {
+            bm25.document_lengths
+                .get(point_id as usize)
+                .copied()
+                .map(|length| EncodedDocumentLength::from_encoded(length).decoded())
+        }))
+    }
+
     fn for_each_token_id<'a, U: UserData>(
         &self,
         tokens: impl Iterator<Item = (U, &'a str)>,
@@ -360,30 +459,191 @@ impl InvertedIndex for ImmutableInvertedIndex {
     }
 }
 
-impl From<MutableInvertedIndex> for ImmutableInvertedIndex {
-    fn from(index: MutableInvertedIndex) -> Self {
+impl InvertedIndexScoring for ImmutableInvertedIndex {
+    fn search_text_index_plain(
+        &self,
+        query: &QueryTokenWeightSet,
+        params: Bm25Params,
+        top: usize,
+        ordered_prefiltered_points: &[PointOffsetType],
+        is_stopped: &AtomicBool,
+    ) -> OperationResult<Vec<ScoredPointOffset>> {
+        if top == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(bm25) = &self.bm25 else {
+            return Err(bm25_scoring_not_enabled_error());
+        };
+        let options = Bm25SearchOptions {
+            params,
+            average_document_length: query.average_document_length(),
+            top,
+            is_stopped,
+        };
+
+        fn search<V: TermFrequencyPostingValue>(
+            index: &ImmutableInvertedIndex,
+            postings: &[PostingList<V>],
+            bm25: &super::ImmutableBm25State,
+            query: &QueryTokenWeightSet,
+            options: Bm25SearchOptions<'_>,
+            ordered_prefiltered_points: &[PointOffsetType],
+        ) -> OperationResult<Vec<ScoredPointOffset>> {
+            let Some(context) = Bm25SearchContext::new(
+                scoring_postings(postings, &index.vocab, query),
+                InMemoryEncodedDocumentLengths(&bm25.document_lengths),
+                options.params,
+                bm25.stats,
+                options.average_document_length,
+                options.top,
+                options.is_stopped,
+            ) else {
+                return Ok(Vec::new());
+            };
+            context.plain_search(
+                &index.search_scratch_pool,
+                ordered_prefiltered_points,
+                |point_id| !index.values_is_empty(point_id),
+            )
+        }
+
+        match &self.postings {
+            ImmutablePostings::WithFrequencies(postings) => search(
+                self,
+                postings,
+                bm25,
+                query,
+                options,
+                ordered_prefiltered_points,
+            ),
+            ImmutablePostings::WithFrequenciesAndPositions(postings) => search(
+                self,
+                postings,
+                bm25,
+                query,
+                options,
+                ordered_prefiltered_points,
+            ),
+            ImmutablePostings::Ids(_) | ImmutablePostings::WithPositions(_) => {
+                Err(bm25_scoring_not_enabled_error())
+            }
+        }
+    }
+
+    fn search_text_index<F>(
+        &self,
+        query: &QueryTokenWeightSet,
+        params: Bm25Params,
+        top: usize,
+        is_stopped: &AtomicBool,
+        filter: F,
+    ) -> OperationResult<Vec<ScoredPointOffset>>
+    where
+        F: Fn(PointOffsetType) -> bool,
+    {
+        if top == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(bm25) = &self.bm25 else {
+            return Err(bm25_scoring_not_enabled_error());
+        };
+        let options = Bm25SearchOptions {
+            params,
+            average_document_length: query.average_document_length(),
+            top,
+            is_stopped,
+        };
+
+        fn search<V: TermFrequencyPostingValue>(
+            index: &ImmutableInvertedIndex,
+            postings: &[PostingList<V>],
+            bm25: &super::ImmutableBm25State,
+            query: &QueryTokenWeightSet,
+            options: Bm25SearchOptions<'_>,
+            filter: impl Fn(PointOffsetType) -> bool,
+        ) -> OperationResult<Vec<ScoredPointOffset>> {
+            let Some(context) = Bm25SearchContext::new(
+                scoring_postings(postings, &index.vocab, query),
+                InMemoryEncodedDocumentLengths(&bm25.document_lengths),
+                options.params,
+                bm25.stats,
+                options.average_document_length,
+                options.top,
+                options.is_stopped,
+            ) else {
+                return Ok(Vec::new());
+            };
+            context.search(&index.search_scratch_pool, |point_id| {
+                !index.values_is_empty(point_id) && filter(point_id)
+            })
+        }
+
+        match &self.postings {
+            ImmutablePostings::WithFrequencies(postings) => {
+                search(self, postings, bm25, query, options, filter)
+            }
+            ImmutablePostings::WithFrequenciesAndPositions(postings) => {
+                search(self, postings, bm25, query, options, filter)
+            }
+            ImmutablePostings::Ids(_) | ImmutablePostings::WithPositions(_) => {
+                Err(bm25_scoring_not_enabled_error())
+            }
+        }
+    }
+}
+
+impl TryFrom<MutableInvertedIndex> for ImmutableInvertedIndex {
+    type Error = OperationError;
+
+    fn try_from(index: MutableInvertedIndex) -> OperationResult<Self> {
         let MutableInvertedIndex {
             postings,
             vocab,
             point_to_tokens,
+            bm25,
             point_to_doc,
             points_count,
+            search_scratch_pool,
         } = index;
+
+        let with_frequencies = bm25.is_some();
 
         let (postings, vocab, orig_to_new_token) = optimized_postings_and_vocab(postings, vocab);
 
-        let postings = match point_to_doc {
-            None => ImmutablePostings::Ids(create_compressed_postings(postings)),
-            Some(point_to_doc) => {
+        let postings = match (with_frequencies, point_to_doc) {
+            (false, None) => ImmutablePostings::Ids(create_compressed_postings(postings)),
+            (false, Some(point_to_doc)) => {
                 ImmutablePostings::WithPositions(create_compressed_postings_with_positions(
                     postings,
                     point_to_doc,
                     &orig_to_new_token,
-                ))
+                )?)
             }
+            (true, None) => ImmutablePostings::WithFrequencies(
+                create_compressed_postings_with_frequencies(postings),
+            ),
+            (true, Some(point_to_doc)) => ImmutablePostings::WithFrequenciesAndPositions(
+                create_compressed_postings_with_frequencies_and_positions(
+                    postings,
+                    point_to_doc,
+                    &orig_to_new_token,
+                )?,
+            ),
         };
 
-        ImmutableInvertedIndex {
+        let bm25 = bm25.map(|bm25| {
+            let document_lengths = bm25
+                .document_lengths
+                .into_iter()
+                .map(|length| EncodedDocumentLength::new(length).encoded())
+                .collect();
+            super::Bm25State {
+                document_lengths,
+                stats: bm25.stats,
+            }
+        });
+
+        Ok(ImmutableInvertedIndex {
             postings,
             vocab,
             point_to_tokens_count: point_to_tokens
@@ -396,7 +656,9 @@ impl From<MutableInvertedIndex> for ImmutableInvertedIndex {
                 })
                 .collect(),
             points_count,
-        }
+            bm25,
+            search_scratch_pool,
+        })
     }
 }
 
@@ -453,7 +715,7 @@ fn create_compressed_postings_with_positions(
     postings: Vec<super::posting_list::PostingList>,
     point_to_doc: Vec<Option<Document>>,
     orig_to_new_token: &AHashMap<TokenId, TokenId>,
-) -> Vec<PostingList<Positions>> {
+) -> OperationResult<Vec<PostingList<Positions>>> {
     // precalculate positions for each token in each document
     let mut point_to_tokens_positions: Vec<AHashMap<TokenId, Positions>> = point_to_doc
         .into_iter()
@@ -468,7 +730,9 @@ fn create_compressed_postings_with_positions(
                 AHashMap::with_capacity(doc_len),
                 |mut map: AHashMap<u32, Positions>, (position, token)| {
                     // use translation of original token to new token from postings optimization
-                    let new_token = orig_to_new_token[&token];
+                    let Some(&new_token) = orig_to_new_token.get(&token) else {
+                        return map;
+                    };
                     map.entry(new_token).or_default().push(position);
                     map
                 },
@@ -477,21 +741,95 @@ fn create_compressed_postings_with_positions(
         .collect::<Vec<_>>();
 
     (0u32..)
-            .zip(postings)
-            .map(|(token, posting)| {
-                posting
-                    .iter()
-                    .map(|id| {
-                        let positions = point_to_tokens_positions[id as usize]
-                            .remove(&token)
-                            .expect(
-                                "If id is this token's posting list, it should have at least one position",
-                            );
-                        (id, positions)
-                    })
-                    .collect()
-            })
-            .collect()
+        .zip(postings)
+        .map(|(token, posting)| {
+            posting
+                .iter()
+                .map(|point_id| {
+                    let positions = point_to_tokens_positions
+                        .get_mut(point_id as usize)
+                        .and_then(|positions| positions.remove(&token))
+                        .ok_or_else(|| {
+                            OperationError::service_error(format!(
+                                "missing positions for token {token} at point {point_id}",
+                            ))
+                        })?;
+                    Ok((point_id, positions))
+                })
+                .collect::<OperationResult<_>>()
+        })
+        .collect()
+}
+
+fn create_compressed_postings_with_frequencies(
+    postings: Vec<super::posting_list::PostingList>,
+) -> Vec<PostingList<TermFrequency>> {
+    postings
+        .into_iter()
+        .map(|posting| {
+            let mut builder = PostingBuilder::new();
+            for element in posting.iter_frequencies() {
+                builder.add(
+                    element.point_id(),
+                    TermFrequency::new(element.term_frequency()),
+                );
+            }
+            builder.build()
+        })
+        .collect()
+}
+
+fn create_compressed_postings_with_frequencies_and_positions(
+    postings: Vec<super::posting_list::PostingList>,
+    point_to_doc: Vec<Option<Document>>,
+    orig_to_new_token: &AHashMap<TokenId, TokenId>,
+) -> OperationResult<Vec<PostingList<TermFrequencyAndPositions>>> {
+    let mut point_to_token_positions: Vec<AHashMap<TokenId, Vec<u32>>> = point_to_doc
+        .into_iter()
+        .map(|document| {
+            let Some(document) = document else {
+                return AHashMap::new();
+            };
+
+            let mut positions = AHashMap::with_capacity(document.len());
+            for (position, token) in (0u32..).zip(document) {
+                let Some(&new_token) = orig_to_new_token.get(&token) else {
+                    // Array boundary sentinels create a positional gap but are
+                    // deliberately excluded from BM25 statistics and postings.
+                    continue;
+                };
+                positions
+                    .entry(new_token)
+                    .or_insert_with(Vec::new)
+                    .push(position);
+            }
+            positions
+        })
+        .collect();
+
+    (0u32..)
+        .zip(postings)
+        .map(|(token, posting)| {
+            posting
+                .iter_frequencies()
+                .map(|element| {
+                    let point_id = element.point_id();
+                    let positions = point_to_token_positions
+                        .get_mut(point_id as usize)
+                        .and_then(|positions| positions.remove(&token))
+                        .ok_or_else(|| {
+                            OperationError::service_error(format!(
+                                "missing positions for token {token} at point {point_id}",
+                            ))
+                        })?;
+                    Ok((
+                        point_id,
+                        TermFrequencyAndPositions::new(element.term_frequency(), positions),
+                    ))
+                })
+                .collect::<OperationResult<_>>()
+        })
+        .collect()
 }
 
 impl<S: common::universal_io::UniversalRead> TryFrom<&OnDiskInvertedIndex<S>>
@@ -504,6 +842,12 @@ impl<S: common::universal_io::UniversalRead> TryFrom<&OnDiskInvertedIndex<S>>
             OnDiskPostingsEnum::Ids(postings) => ImmutablePostings::Ids(postings.all_postings()?),
             OnDiskPostingsEnum::WithPositions(postings) => {
                 ImmutablePostings::WithPositions(postings.all_postings()?)
+            }
+            OnDiskPostingsEnum::WithFrequencies(postings) => {
+                ImmutablePostings::WithFrequencies(postings.all_postings()?)
+            }
+            OnDiskPostingsEnum::WithFrequenciesAndPositions(postings) => {
+                ImmutablePostings::WithFrequenciesAndPositions(postings.all_postings()?)
             }
         };
 
@@ -542,6 +886,18 @@ impl<S: common::universal_io::UniversalRead> TryFrom<&OnDiskInvertedIndex<S>>
             vocab,
             point_to_tokens_count,
             points_count: index.points_count(),
+            bm25: index
+                .storage
+                .bm25
+                .as_ref()
+                .map(|bm25| -> OperationResult<_> {
+                    Ok(super::Bm25State {
+                        document_lengths: bm25.document_lengths.read_whole()?.into_owned(),
+                        stats: bm25.stats,
+                    })
+                })
+                .transpose()?,
+            search_scratch_pool: FullTextSearchScratchPool::new(),
         })
     }
 }
@@ -554,6 +910,8 @@ impl ImmutableInvertedIndex {
             vocab,
             point_to_tokens_count,
             points_count: _,
+            bm25,
+            search_scratch_pool: _,
         } = self;
 
         let postings_bytes = postings.ram_usage_bytes();
@@ -564,6 +922,9 @@ impl ImmutableInvertedIndex {
         // Account for actual heap-allocated string data
         let vocab_heap_bytes: usize = vocab.keys().map(|s| s.capacity()).sum();
         let pttc_bytes = point_to_tokens_count.capacity() * size_of::<usize>();
-        postings_bytes + vocab_base_bytes + vocab_heap_bytes + pttc_bytes
+        let document_lengths_bytes = bm25
+            .as_ref()
+            .map_or(0, |bm25| bm25.document_lengths.capacity() * size_of::<u8>());
+        postings_bytes + vocab_base_bytes + vocab_heap_bytes + pttc_bytes + document_lengths_bytes
     }
 }

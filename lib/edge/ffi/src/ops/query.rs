@@ -12,6 +12,7 @@ use segment::data_types::order_by::{
 };
 use segment::data_types::vectors::{DEFAULT_VECTOR_NAME, NamedQuery, VectorInternal};
 use segment::index::query_optimization::rescore_formula::parsed_formula::ParsedFormula;
+use segment::json_path::JsonPath;
 use segment::types::{
     Filter as SegmentFilter, SearchParams as SegmentSearchParams, WithPayloadInterface,
     WithVector as SegmentWithVector,
@@ -21,6 +22,7 @@ use segment::vector_storage::query::{
     FeedbackItem as SegmentFeedbackItem, NaiveFeedbackCoefficients, NaiveFeedbackQuery, RecoQuery,
 };
 use shard::query::formula::FormulaInternal;
+use shard::query::payload_query::TextQueryInternal;
 use shard::query::query_enum::QueryEnum;
 use shard::query::*;
 
@@ -248,6 +250,13 @@ pub enum Query {
         #[uniffi(default = None)]
         using: Option<String>,
     },
+    /// BM25 text search against a full-text payload index.
+    Text {
+        /// Payload field to search. JSON-path syntax is supported.
+        key: String,
+        /// Text to tokenize and score with the field's configured tokenizer.
+        query: String,
+    },
 }
 
 /// The engine requires the target vector name to be present; `None` from the
@@ -358,6 +367,15 @@ impl TryFrom<Query> for QueryEnum {
                     using: Some(using_or_default(using)),
                 })
             }
+            Query::Text { key, query } => QueryEnum::Text(TextQueryInternal {
+                key: key.parse::<JsonPath>().map_err(|()| {
+                    crate::error::EdgeError::invalid_argument(format!(
+                        "invalid payload JSON path {key:?}"
+                    ))
+                })?,
+                query_str: query,
+                resolved: None,
+            }),
         })
     }
 }
@@ -798,6 +816,8 @@ fn assert_every_scoring_query_is_mapped(q: shard::query::ScoringQuery) {
             QueryEnum::Context(_) => {}
             // [`Query::Feedback`]
             QueryEnum::FeedbackNaive(_) => {}
+            // [`Query::Text`]
+            QueryEnum::Text(_) => {}
         },
         shard::query::ScoringQuery::Fusion(f) => match f {
             // [`Fusion::Rrf`], including `weights`
