@@ -1,17 +1,18 @@
 use std::cmp;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use common::counter::hardware_accumulator::HwMeasurementAcc;
 use common::iterator_ext::IteratorExt;
 use segment::common::operation_error::{OperationError, OperationResult};
 use segment::data_types::modifier::Modifier;
-use segment::data_types::query_context::QueryContext;
+use segment::data_types::query_context::{PayloadTextSearchContext, QueryContext};
 use segment::entry::ReadSegmentEntry;
-use segment::types::{DEFAULT_FULL_SCAN_THRESHOLD, Distance, ScoredPoint};
+use segment::types::{DEFAULT_FULL_SCAN_THRESHOLD, ScoredPoint};
 use shard::common::stopping_guard::StoppingGuard;
 use shard::query::query_context::init_query_context;
-use shard::query::query_enum::QueryEnum;
-use shard::search::{CoreSearchRequest, group_search_batches};
+use shard::query::query_enum::{QueryEnum, ResolvedScoreSemantics};
+use shard::search::{CoreSearchRequest, QueryBatchGroup, SearchBatchGroup, group_search_batches};
 use shard::search_result_aggregator::BatchResultAggregator;
 
 use crate::read_view::{EdgeReadView, ReadSegmentHandle};
@@ -19,6 +20,18 @@ use crate::read_view::{EdgeReadView, ReadSegmentHandle};
 impl<H: ReadSegmentHandle> EdgeReadView<H> {
     /// This method is DEPRECATED and should be replaced with query.
     pub fn search(&self, search: CoreSearchRequest) -> OperationResult<Vec<ScoredPoint>> {
+        validate_deprecated_search_query(&search.query)?;
+        self.search_core(search)
+    }
+
+    /// Executes a segment-level search produced by the universal query planner.
+    ///
+    /// Unlike the deprecated public [`Self::search`], this accepts the planner's
+    /// resolved payload-text leaf.
+    pub(crate) fn search_core(
+        &self,
+        search: CoreSearchRequest,
+    ) -> OperationResult<Vec<ScoredPoint>> {
         let [points] =
             self.search_batch(&[search])?
                 .try_into()
@@ -64,9 +77,15 @@ impl<H: ReadSegmentHandle> EdgeReadView<H> {
         )?;
 
         // Resolved up front so an unknown vector name fails the batch before any search runs.
-        let distances = searches
+        let score_semantics = searches
             .iter()
-            .map(|search| self.config.get_distance(search.query.get_vector_name()))
+            .map(|search| {
+                search
+                    .query
+                    .capabilities()
+                    .score
+                    .resolve(|vector_name| self.config.get_distance(vector_name))
+            })
             .collect::<OperationResult<Vec<_>>>()?;
 
         let Some(context) = fill_query_context_over(
@@ -90,20 +109,44 @@ impl<H: ReadSegmentHandle> EdgeReadView<H> {
 
             let mut points_by_request = Vec::with_capacity(searches.len());
             for group in &groups {
-                let query_vectors: Vec<_> = group.query_vectors.iter().collect();
-                let batched_points = segment.search_batch(
-                    group.params.vector_name,
-                    &query_vectors,
-                    &group.params.with_payload,
-                    &group.params.with_vector,
-                    group.params.filter,
-                    group.params.top,
-                    group.params.params,
-                    &segment_query_context,
-                )?;
-
-                debug_assert_eq!(batched_points.len(), group.query_vectors.len());
-                points_by_request.extend(batched_points);
+                match group {
+                    QueryBatchGroup::Vector(SearchBatchGroup {
+                        params,
+                        query_vectors,
+                    }) => {
+                        let query_vectors: Vec<_> = query_vectors.iter().collect();
+                        let batched_points = segment.search_batch(
+                            params.vector_name,
+                            &query_vectors,
+                            &params.with_payload,
+                            &params.with_vector,
+                            params.filter,
+                            params.top,
+                            params.params,
+                            &segment_query_context,
+                        )?;
+                        debug_assert_eq!(batched_points.len(), query_vectors.len());
+                        points_by_request.extend(batched_points);
+                    }
+                    QueryBatchGroup::Text(request) => {
+                        let QueryEnum::Text(text_query) = &request.query else {
+                            return Err(OperationError::service_error(
+                                "non-text query was assigned to a text search group",
+                            ));
+                        };
+                        let context = PayloadTextSearchContext {
+                            key: text_query.key.clone(),
+                            query: text_query.resolved_query()?,
+                            filter: request.filter.clone(),
+                            top: request.limit + request.offset,
+                            is_stopped: segment_query_context.is_stopped_handle(),
+                        };
+                        points_by_request.push(segment.search_payload_text(
+                            Arc::new(context),
+                            &segment_query_context.hardware_counter(),
+                        )?);
+                    }
+                }
             }
 
             Ok(points_by_request)
@@ -123,14 +166,26 @@ impl<H: ReadSegmentHandle> EdgeReadView<H> {
         let mut points_by_request = aggregator.into_topk();
         debug_assert_eq!(points_by_request.len(), searches.len());
 
-        for ((points, search), distance) in
-            points_by_request.iter_mut().zip(searches).zip(distances)
+        for ((points, search), score_semantics) in points_by_request
+            .iter_mut()
+            .zip(searches)
+            .zip(score_semantics)
         {
-            postprocess_scores(points, search, distance);
+            postprocess_scores(points, search, score_semantics);
         }
 
         Ok(points_by_request)
     }
+}
+
+fn validate_deprecated_search_query(query: &QueryEnum) -> OperationResult<()> {
+    if matches!(query, QueryEnum::Text(_)) {
+        return Err(OperationError::validation_error(
+            "payload text queries must be executed through the query API",
+        ));
+    }
+
+    Ok(())
 }
 
 /// Turn the raw segment scores of a single request into the scores the caller expects: apply the
@@ -138,31 +193,22 @@ impl<H: ReadSegmentHandle> EdgeReadView<H> {
 fn postprocess_scores(
     points: &mut Vec<ScoredPoint>,
     search: &CoreSearchRequest,
-    distance: Distance,
+    score_semantics: ResolvedScoreSemantics,
 ) {
-    match &search.query {
-        // Only plain nearest-neighbour scores are raw segment distances; every other query
-        // already produces a comparable score of its own.
-        QueryEnum::Nearest(_) => {
-            for point in points.iter_mut() {
-                point.score = distance.postprocess_score(point.score);
-            }
-        }
-        QueryEnum::RecommendBestScore(_) => (),
-        QueryEnum::RecommendSumScores(_) => (),
-        QueryEnum::Discover(_) => (),
-        QueryEnum::Context(_) => (),
-        QueryEnum::FeedbackNaive(_) => (),
+    for point in points.iter_mut() {
+        point.score = score_semantics.postprocess(point.score);
     }
 
     if let Some(score_threshold) = search.score_threshold {
         debug_assert!(
-            points.is_sorted_by(|left, right| distance.is_ordered(left.score, right.score)),
+            points.is_sorted_by(|left, right| {
+                score_semantics.is_ordered(left.score, right.score)
+            }),
         );
 
         let below_threshold = points
             .iter()
-            .position(|point| !distance.check_threshold(point.score, score_threshold));
+            .position(|point| !score_semantics.passes_threshold(point.score, score_threshold));
 
         if let Some(below_threshold_idx) = below_threshold {
             points.truncate(below_threshold_idx);
@@ -192,4 +238,53 @@ fn fill_query_context_over<H: ReadSegmentHandle>(
     }
 
     Ok(Some(query_context))
+}
+
+#[cfg(test)]
+mod tests {
+    use ordered_float::OrderedFloat;
+    use segment::data_types::vectors::{NamedQuery, VectorInternal};
+    use shard::query::payload_query::{ResolvedTextQuery, TextQueryInternal};
+
+    use super::*;
+
+    #[test]
+    fn deprecated_search_rejects_unresolved_payload_text_query() {
+        let query = QueryEnum::Text(TextQueryInternal {
+            key: "description".parse().unwrap(),
+            query_str: "rust search".to_string(),
+            resolved: None,
+        });
+
+        let error = validate_deprecated_search_query(&query).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("payload text queries must be executed through the query API")
+        );
+    }
+
+    #[test]
+    fn deprecated_search_rejects_even_pre_resolved_payload_text_query() {
+        let query = QueryEnum::Text(TextQueryInternal {
+            key: "description".parse().unwrap(),
+            query_str: "rust search".to_string(),
+            resolved: Some(ResolvedTextQuery {
+                token_weights: vec![("rust".to_string(), OrderedFloat(1.0))],
+                average_document_length: None,
+            }),
+        });
+
+        assert!(validate_deprecated_search_query(&query).is_err());
+    }
+
+    #[test]
+    fn deprecated_search_accepts_vector_query() {
+        let query = QueryEnum::Nearest(NamedQuery::new(
+            VectorInternal::from(vec![1.0]),
+            "vector".to_string(),
+        ));
+
+        assert!(validate_deprecated_search_query(&query).is_ok());
+    }
 }

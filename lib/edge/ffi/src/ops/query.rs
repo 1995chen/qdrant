@@ -13,14 +13,16 @@ use segment::data_types::order_by::{
 use segment::data_types::vectors::{DEFAULT_VECTOR_NAME, NamedQuery, VectorInternal};
 use segment::index::query_optimization::rescore_formula::parsed_formula::ParsedFormula;
 use segment::types::{
-    Filter as SegmentFilter, SearchParams as SegmentSearchParams, WithPayloadInterface,
-    WithVector as SegmentWithVector,
+    Filter as SegmentFilter, IdfCorpusParams as SegmentIdfCorpusParams,
+    IdfParams as SegmentIdfParams, IdfScope as SegmentIdfScope,
+    SearchParams as SegmentSearchParams, WithPayloadInterface, WithVector as SegmentWithVector,
 };
 use segment::vector_storage::query::{
     ContextPair as SegmentContextPair, ContextQuery, DiscoverQuery,
     FeedbackItem as SegmentFeedbackItem, NaiveFeedbackCoefficients, NaiveFeedbackQuery, RecoQuery,
 };
 use shard::query::formula::FormulaInternal;
+use shard::query::payload_query::{PayloadQueryInternal, TextQueryInternal};
 use shard::query::query_enum::QueryEnum;
 use shard::query::*;
 
@@ -82,9 +84,28 @@ impl EdgeShard {
 
 // ── SearchParams ────────────────────────────────────────────────────────────
 
-/// Tuning parameters that affect how a single ANN search is executed.
-///
-/// These are tuning knobs; the defaults are reasonable for most workloads.
+/// Population over which IDF statistics are computed.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct IdfParams {
+    /// Optional corpus filter. `None` selects the shard-global population.
+    #[uniffi(default = None)]
+    pub corpus: Option<Filter>,
+}
+
+impl TryFrom<IdfParams> for SegmentIdfParams {
+    type Error = crate::error::EdgeError;
+
+    fn try_from(params: IdfParams) -> Result<Self, Self::Error> {
+        Ok(match params.corpus {
+            Some(corpus) => Self::Corpus(SegmentIdfCorpusParams {
+                corpus: SegmentFilter::try_from(corpus)?,
+            }),
+            None => Self::Scope(SegmentIdfScope::Global),
+        })
+    }
+}
+
+/// Parameters that affect query execution.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct SearchParams {
     /// HNSW `ef` parameter — the size of the candidate set kept during
@@ -100,23 +121,29 @@ pub struct SearchParams {
     /// payload fields. Rarely needed on mobile.
     #[uniffi(default = false)]
     pub indexed_only: bool,
+    /// IDF population for sparse-vector and BM25 payload-text queries.
+    #[uniffi(default = None)]
+    pub idf: Option<IdfParams>,
 }
 
-impl From<SearchParams> for SegmentSearchParams {
-    fn from(p: SearchParams) -> Self {
+impl TryFrom<SearchParams> for SegmentSearchParams {
+    type Error = crate::error::EdgeError;
+
+    fn try_from(p: SearchParams) -> Result<Self, Self::Error> {
         let SearchParams {
             hnsw_ef,
             exact,
             indexed_only,
+            idf,
         } = p;
-        SegmentSearchParams {
+        Ok(Self {
             hnsw_ef: hnsw_ef.map(crate::error::clamp_usize),
             exact,
             quantization: None,
             indexed_only,
             acorn: None,
-            idf: None,
-        }
+            idf: idf.map(SegmentIdfParams::try_from).transpose()?,
+        })
     }
 }
 
@@ -183,7 +210,7 @@ pub struct FeedbackCoefficients {
     pub c: f32,
 }
 
-/// A primitive vector query.
+/// A primitive vector scoring query.
 ///
 /// Used directly by [`SearchRequest`](crate::ops::search::SearchRequest) and
 /// as the leaf of more complex [`ScoringQuery`] expressions. Every variant
@@ -362,6 +389,39 @@ impl TryFrom<Query> for QueryEnum {
     }
 }
 
+/// A payload-backed scoring query.
+#[derive(Clone, Debug, uniffi::Enum)]
+pub enum PayloadQuery {
+    /// Full-text search against a BM25-enabled payload index.
+    Text {
+        /// Payload key to search. JSON-path syntax is supported.
+        key: String,
+        /// Text to tokenize and score against the indexed payload values.
+        query_str: String,
+    },
+}
+
+impl TryFrom<PayloadQuery> for PayloadQueryInternal {
+    type Error = crate::error::EdgeError;
+
+    fn try_from(query: PayloadQuery) -> Result<Self, Self::Error> {
+        match query {
+            PayloadQuery::Text { key, query_str } => {
+                if query_str.is_empty() {
+                    return Err(crate::error::EdgeError::invalid_argument(
+                        "query_str can't be empty",
+                    ));
+                }
+                Ok(Self::Text(TextQueryInternal {
+                    key: crate::error::parse_json_path(&key)?,
+                    query_str,
+                    resolved: None,
+                }))
+            }
+        }
+    }
+}
+
 // ── ScoringQuery ────────────────────────────────────────────────────────────
 
 /// The scoring strategy applied by [`QueryRequest`].
@@ -372,6 +432,8 @@ impl TryFrom<Query> for QueryEnum {
 pub enum ScoringQuery {
     /// Score results by vector similarity (the typical search case).
     Vector { query: Query },
+    /// Score results using a payload index.
+    Payload { query: PayloadQuery },
     /// Fuse scores from multiple prefetch branches. Requires a non-empty
     /// `QueryRequest.prefetches`.
     Fusion { fusion: Fusion },
@@ -413,6 +475,9 @@ impl TryFrom<ScoringQuery> for shard::query::ScoringQuery {
         match q {
             ScoringQuery::Vector { query } => Ok(shard::query::ScoringQuery::Vector(
                 QueryEnum::try_from(query)?,
+            )),
+            ScoringQuery::Payload { query } => Ok(shard::query::ScoringQuery::Payload(
+                PayloadQueryInternal::try_from(query)?,
             )),
             ScoringQuery::Fusion { fusion } => Ok(shard::query::ScoringQuery::Fusion(
                 FusionInternal::try_from(fusion)?,
@@ -650,7 +715,8 @@ pub struct Prefetch {
     /// Minimum score threshold; candidates scoring below are dropped.
     #[uniffi(default = None)]
     pub score_threshold: Option<f32>,
-    /// Branch-specific search parameters.
+    /// Branch-specific search parameters. Payload text queries ignore the
+    /// vector-specific fields exposed by this binding.
     #[uniffi(default = None)]
     pub params: Option<SearchParams>,
 }
@@ -685,7 +751,7 @@ fn prefetch_to_edge(p: Prefetch, depth: u32) -> Result<edge::Prefetch, crate::er
         query: query
             .map(shard::query::ScoringQuery::try_from)
             .transpose()?,
-        params: params.map(SegmentSearchParams::from),
+        params: params.map(SegmentSearchParams::try_from).transpose()?,
         filter: filter.map(SegmentFilter::try_from).transpose()?,
         score_threshold,
     })
@@ -728,7 +794,8 @@ pub struct QueryRequest {
     /// Minimum score threshold; candidates scoring below are dropped.
     #[uniffi(default = None)]
     pub score_threshold: Option<f32>,
-    /// Search tuning parameters.
+    /// Search tuning parameters. Payload text queries ignore the
+    /// vector-specific fields exposed by this binding.
     #[uniffi(default = None)]
     pub params: Option<SearchParams>,
 }
@@ -765,7 +832,7 @@ impl TryFrom<QueryRequest> for edge::QueryRequest {
                 .transpose()?,
             filter: filter.map(SegmentFilter::try_from).transpose()?,
             score_threshold,
-            params: params.map(SegmentSearchParams::from),
+            params: params.map(SegmentSearchParams::try_from).transpose()?,
         })
     }
 }
@@ -798,6 +865,13 @@ fn assert_every_scoring_query_is_mapped(q: shard::query::ScoringQuery) {
             QueryEnum::Context(_) => {}
             // [`Query::Feedback`]
             QueryEnum::FeedbackNaive(_) => {}
+            // Payload queries are represented by [`ScoringQuery::Payload`], not
+            // the vector-only [`ScoringQuery::Vector`] variant.
+            QueryEnum::Text(_) => {}
+        },
+        shard::query::ScoringQuery::Payload(query) => match query {
+            // [`PayloadQuery::Text`]
+            PayloadQueryInternal::Text(_) => {}
         },
         shard::query::ScoringQuery::Fusion(f) => match f {
             // [`Fusion::Rrf`], including `weights`
@@ -828,5 +902,86 @@ fn assert_every_scoring_query_is_mapped(q: shard::query::ScoringQuery) {
             // [`Sample::Random`]
             SampleInternal::Random => {}
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn search_params(idf: Option<IdfParams>) -> SearchParams {
+        SearchParams {
+            hnsw_ef: None,
+            exact: false,
+            indexed_only: false,
+            idf,
+        }
+    }
+
+    #[test]
+    fn search_params_convert_global_idf_scope() {
+        let params =
+            SegmentSearchParams::try_from(search_params(Some(IdfParams { corpus: None }))).unwrap();
+
+        assert!(matches!(
+            params.idf,
+            Some(SegmentIdfParams::Scope(SegmentIdfScope::Global))
+        ));
+    }
+
+    #[test]
+    fn search_params_convert_filtered_idf_corpus() {
+        let params = SegmentSearchParams::try_from(search_params(Some(IdfParams {
+            corpus: Some(Filter {
+                must: None,
+                should: None,
+                must_not: None,
+                min_should: None,
+            }),
+        })))
+        .unwrap();
+
+        let Some(SegmentIdfParams::Corpus(corpus)) = params.idf else {
+            panic!("expected filtered IDF corpus");
+        };
+        assert_eq!(corpus.corpus, SegmentFilter::default());
+    }
+
+    #[test]
+    fn text_query_converts_to_unresolved_internal_query() {
+        let query = PayloadQueryInternal::try_from(PayloadQuery::Text {
+            key: "description".to_string(),
+            query_str: "rust search".to_string(),
+        })
+        .expect("valid text query must convert");
+
+        let PayloadQueryInternal::Text(query) = query;
+        assert_eq!(query.key.to_string(), "description");
+        assert_eq!(query.query_str, "rust search");
+        assert_eq!(query.resolved, None);
+    }
+
+    #[test]
+    fn text_query_rejects_invalid_json_path() {
+        let result = PayloadQueryInternal::try_from(PayloadQuery::Text {
+            key: "description[".to_string(),
+            query_str: "rust search".to_string(),
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn text_query_rejects_empty_query_string() {
+        let result = PayloadQueryInternal::try_from(PayloadQuery::Text {
+            key: "description".to_string(),
+            query_str: String::new(),
+        });
+
+        assert!(matches!(
+            result,
+            Err(crate::error::EdgeError::InvalidArgument { reason })
+                if reason == "query_str can't be empty"
+        ));
     }
 }

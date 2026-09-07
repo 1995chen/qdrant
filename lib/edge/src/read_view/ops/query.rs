@@ -16,7 +16,9 @@ use segment::types::{
     Filter, HasIdCondition, ScoredPoint, WithPayload, WithPayloadInterface, WithVector,
 };
 use shard::query::mmr::mmr_from_points_with_vector;
+use shard::query::payload_query::{TextQueryStats, validate_text_query_schema};
 use shard::query::planned_query::*;
+use shard::query::query_enum::QueryEnum;
 use shard::query::scroll::{QueryScrollRequestInternal, ScrollOrder};
 use shard::query::*;
 use shard::retrieve::retrieve_blocking::retrieve_over;
@@ -51,8 +53,9 @@ impl<H: ReadSegmentHandle> EdgeReadView<H> {
     /// Returns one result list per request, in request order.
     pub(crate) fn query_batch(
         &self,
-        requests: Vec<ShardQueryRequest>,
+        mut requests: Vec<ShardQueryRequest>,
     ) -> OperationResult<Vec<Vec<ScoredPoint>>> {
+        self.resolve_text_queries(&mut requests)?;
         let planned_query = PlannedQuery::try_from(requests)?;
 
         let PlannedQuery {
@@ -81,6 +84,48 @@ impl<H: ReadSegmentHandle> EdgeReadView<H> {
         }
 
         Ok(scored_points_batch)
+    }
+
+    fn resolve_text_queries(&self, requests: &mut [ShardQueryRequest]) -> OperationResult<()> {
+        let stats_requests = requests
+            .iter()
+            .flat_map(ShardQueryRequest::text_query_stats_requests)
+            .collect::<AHashSet<_>>();
+        let hw_counter = HwMeasurementAcc::disposable_edge().get_counter_cell();
+        let is_stopped = AtomicBool::new(false);
+
+        for stats_request in stats_requests {
+            let schema = self.segments.iter().find_map(|segment| {
+                segment
+                    .read_segment()
+                    .get_indexed_fields()
+                    .get(&stats_request.key)
+                    .cloned()
+            });
+            validate_text_query_schema(&stats_request.key, schema.as_ref())?;
+
+            let mut stats: Option<TextQueryStats> = None;
+            for segment in &self.segments {
+                let segment_stats = segment.read_segment().payload_text_stats(
+                    &stats_request.key,
+                    &stats_request.query_str,
+                    stats_request.corpus.as_ref(),
+                    &is_stopped,
+                    &hw_counter,
+                )?;
+                let segment_stats = TextQueryStats::from(segment_stats);
+                if let Some(stats) = &mut stats {
+                    stats.merge(segment_stats)?;
+                } else {
+                    stats = Some(segment_stats);
+                }
+            }
+            let (weights, average_document_length) = stats.unwrap_or_default().into_query_parts();
+            for request in requests.iter_mut() {
+                request.set_text_query_stats(&stats_request, &weights, average_document_length);
+            }
+        }
+        Ok(())
     }
 
     fn resolve_plan(
@@ -255,7 +300,23 @@ impl<H: ReadSegmentHandle> EdgeReadView<H> {
                     score_threshold: score_threshold.map(OrderedFloat::into_inner),
                 };
 
-                self.search(search_request)
+                self.search_core(search_request)
+            }
+
+            ScoringQuery::Payload(payload_query) => {
+                let filter = filter_by_point_ids(&sources);
+                let search_request = CoreSearchRequest {
+                    query: QueryEnum::from(payload_query),
+                    filter: Some(filter),
+                    params,
+                    limit,
+                    offset: 0,
+                    with_payload: None,
+                    with_vector: None,
+                    score_threshold: score_threshold.map(OrderedFloat::into_inner),
+                };
+
+                self.search_core(search_request)
             }
 
             ScoringQuery::Formula(formula) => self.rescore_with_formula(
@@ -468,8 +529,14 @@ fn filter_by_point_ids(points: &[Vec<ScoredPoint>]) -> Filter {
 
 #[cfg(test)]
 mod tests {
+    use segment::data_types::index::{TextIndexBm25Config, TextIndexParams};
     use segment::data_types::vectors::{NamedQuery, VectorInternal};
-    use segment::types::{Condition, WithPayloadInterface};
+    use segment::types::{
+        Condition, Payload, PayloadFieldSchema, PayloadSchemaParams, WithPayloadInterface,
+    };
+    use shard::operations::point_ops::PointStructPersisted;
+    use shard::operations::{CollectionUpdateOperations, CreateIndex, FieldIndexOperations};
+    use shard::query::payload_query::{PayloadQueryInternal, TextQueryInternal};
     use shard::query::query_enum::QueryEnum;
 
     use super::*;
@@ -494,6 +561,41 @@ mod tests {
         let shard = EdgeShard::new(dir.path(), test_config()).unwrap();
         upsert(&shard, (1..=n).map(point).collect());
         shard
+    }
+
+    fn point_with_description(id: u64, description: &str) -> PointStructPersisted {
+        let mut point = point(id);
+        let payload = serde_json::json!({ "description": description });
+        point.payload = Some(Payload::from(payload.as_object().unwrap().clone()));
+        point
+    }
+
+    fn create_bm25_text_index(shard: &EdgeShard) {
+        shard
+            .update(CollectionUpdateOperations::FieldIndexOperation(
+                FieldIndexOperations::CreateIndex(CreateIndex {
+                    field_name: "description".parse().unwrap(),
+                    field_schema: Some(PayloadFieldSchema::FieldParams(PayloadSchemaParams::Text(
+                        TextIndexParams {
+                            bm25_config: Some(TextIndexBm25Config {
+                                enable: Some(true),
+                                k1: None,
+                                b: None,
+                            }),
+                            ..Default::default()
+                        },
+                    ))),
+                }),
+            ))
+            .unwrap();
+    }
+
+    fn payload_text_query(query_str: &str) -> ScoringQuery {
+        ScoringQuery::Payload(PayloadQueryInternal::Text(TextQueryInternal {
+            key: "description".parse().unwrap(),
+            query_str: query_str.to_string(),
+            resolved: None,
+        }))
     }
 
     /// The whole point of the batch: it must return exactly what the same requests return one by
@@ -526,6 +628,29 @@ mod tests {
         assert_eq!(batches[0][0].id, 3.into());
         assert_eq!(batches[1][0].id, 3.into());
         assert_eq!(batches[1][1].id, 2.into());
+    }
+
+    #[test]
+    fn payload_text_query_executes_as_a_query_rescore() {
+        let dir = tempfile::tempdir().unwrap();
+        let shard = EdgeShard::new(dir.path(), test_config()).unwrap();
+        upsert(
+            &shard,
+            vec![
+                point_with_description(1, "rust search"),
+                point_with_description(2, "python search"),
+            ],
+        );
+        create_bm25_text_index(&shard);
+
+        let request = QueryRequestBuilder::new(2)
+            .add_prefetch(PrefetchBuilder::new(2).query(nearest_query(1.0)).build())
+            .query(payload_text_query("rust"))
+            .build();
+
+        let results = shard.query(request).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, 1.into());
     }
 
     #[test]

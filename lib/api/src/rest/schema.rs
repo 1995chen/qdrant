@@ -579,13 +579,15 @@ pub struct QueryRequestInternal {
     pub query: Option<QueryInterface>,
 
     /// Define which vector name to use for querying. If missing, the default vector is used.
+    /// Payload queries reject a non-default value.
     pub using: Option<VectorNameBuf>,
 
     /// Filter conditions - return only those points that satisfy the specified conditions.
     #[validate(nested)]
     pub filter: Option<Filter>,
 
-    /// Search params for when there is no prefetch
+    /// Search params for when there is no prefetch. BM25 payload text queries use only `idf`;
+    /// vector-specific options have no effect.
     #[validate(nested)]
     pub params: Option<SearchParams>,
 
@@ -606,8 +608,9 @@ pub struct QueryRequestInternal {
     /// Options for specifying which payload to include or not. Default is false.
     pub with_payload: Option<WithPayloadInterface>,
 
-    /// The location to use for IDs lookup, if not specified - use the current collection and the 'using' vector
+    /// The location to use for IDs lookup, if not specified - use the current collection and the 'using' vector.
     /// Note: the other collection vectors should have the same vector size as the 'using' vector in the current collection
+    /// Payload queries do not support this option.
     #[serde(default)]
     pub lookup_from: Option<LookupLocation>,
 }
@@ -671,6 +674,9 @@ pub enum Query {
 
     /// Use feedback from an oracle to improve the results
     RelevanceFeedback(RelevanceFeedbackQuery),
+
+    /// Score points by payload content.
+    Payload(PayloadQuery),
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Validate)]
@@ -750,6 +756,33 @@ pub struct RelevanceFeedbackQuery {
     pub relevance_feedback: RelevanceFeedbackInput,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(rename_all = "snake_case")]
+pub struct PayloadQuery {
+    #[validate(nested)]
+    pub payload: PayloadQueryInterface,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum PayloadQueryInterface {
+    Text(TextQuery),
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(rename_all = "snake_case")]
+pub struct TextQuery {
+    #[validate(nested)]
+    pub text: TextQueryInput,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Validate)]
+pub struct TextQueryInput {
+    pub key: JsonPath,
+    #[validate(length(min = 1, message = "query_str can't be empty"))]
+    pub query_str: String,
+}
+
 /// Maximal Marginal Relevance (MMR) algorithm for re-ranking the points.
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Validate)]
 #[serde(rename_all = "snake_case")]
@@ -785,13 +818,15 @@ pub struct Prefetch {
     pub query: Option<QueryInterface>,
 
     /// Define which vector name to use for querying. If missing, the default vector is used.
+    /// Payload queries reject a non-default value.
     pub using: Option<VectorNameBuf>,
 
     /// Filter conditions - return only those points that satisfy the specified conditions.
     #[validate(nested)]
     pub filter: Option<Filter>,
 
-    /// Search params for when there is no prefetch
+    /// Search params for when there is no prefetch. BM25 payload text queries use only `idf`;
+    /// vector-specific options have no effect.
     #[validate(nested)]
     pub params: Option<SearchParams>,
 
@@ -802,8 +837,9 @@ pub struct Prefetch {
     #[validate(range(min = 1))]
     pub limit: Option<usize>,
 
-    /// The location to use for IDs lookup, if not specified - use the current collection and the 'using' vector
+    /// The location to use for IDs lookup, if not specified - use the current collection and the 'using' vector.
     /// Note: the other collection vectors should have the same vector size as the 'using' vector in the current collection
+    /// Payload queries do not support this option.
     #[serde(default)]
     pub lookup_from: Option<LookupLocation>,
 }

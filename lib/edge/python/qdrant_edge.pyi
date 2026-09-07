@@ -18,7 +18,9 @@ Payload = Dict[str, Any]
 JsonPath = str
 WithPayloadType = Union[bool, List[str], "PayloadSelector"]
 WithVectorType = Union[bool, List[str]]
-ScoringQueryType = Union["Query", "Fusion", "OrderBy", "Formula", "Sample", "Mmr"]
+ScoringQueryType = Union[
+    "Query", "PayloadQuery", "Fusion", "OrderBy", "Formula", "Sample", "Mmr"
+]
 ConditionType = Union[
     "FieldCondition",
     "IsEmptyCondition",
@@ -1649,13 +1651,14 @@ class QueryRequest:
         Args:
             limit: Maximum number of results.
             offset: Number of results to skip.
-            query: Scoring query (vector, fusion, order_by, etc.).
+            query: Scoring query (vector, payload, fusion, order_by, etc.).
             prefetches: Prefetch stages for multi-stage queries.
             with_vector: Whether to include vectors.
             with_payload: Whether to include payload.
             filter: Filter conditions.
             score_threshold: Minimum score threshold.
-            params: Search parameters.
+            params: Search parameters. Payload text queries use only ``idf``;
+                vector-specific options are ignored.
         """
         ...
 
@@ -1691,7 +1694,7 @@ class QueryRequest:
 
     @property
     def params(self) -> Optional["SearchParams"]:
-        """Search parameters."""
+        """Search parameters; payload text queries use only ``idf``."""
         ...
 
     @property
@@ -1723,7 +1726,8 @@ class Prefetch:
             limit: Maximum number of results for this stage.
             query: Scoring query.
             prefetches: Nested prefetch stages.
-            params: Search parameters.
+            params: Search parameters. Payload text queries use only ``idf``;
+                vector-specific options are ignored.
             filter: Filter conditions.
             score_threshold: Minimum score threshold.
         """
@@ -1746,7 +1750,7 @@ class Prefetch:
 
     @property
     def params(self) -> Optional["SearchParams"]:
-        """Search parameters."""
+        """Search parameters; payload text queries use only ``idf``."""
         ...
 
     @property
@@ -2001,7 +2005,8 @@ class SearchParams:
             quantization: Quantization search parameters.
             indexed_only: Whether to search only indexed vectors.
             acorn: Acorn search parameters.
-            idf: Population sparse IDF statistics are computed over.
+            idf: Population over which sparse-vector or BM25 payload-text IDF
+                statistics are computed.
         """
         ...
 
@@ -2036,9 +2041,10 @@ class SearchParams:
         ...
 
 class IdfParams:
-    """Population over which sparse vector IDF statistics are computed - the IDF corpus.
+    """Population over which IDF statistics are computed.
 
-    Only applicable to sparse vectors with the IDF modifier enabled.
+    Applicable to sparse vectors with the IDF modifier enabled and BM25
+    payload text queries.
     """
 
     def __init__(
@@ -2162,6 +2168,15 @@ class Query(Enum):
         query: "FeedbackNaiveQuery", using: Optional[str] = None
     ) -> "Query":
         """Create a feedback naive query."""
+        ...
+
+
+class PayloadQuery(Enum):
+    """Payload-backed scoring queries."""
+
+    @staticmethod
+    def Text(key: str, query_str: str) -> "PayloadQuery":
+        """Create a BM25 payload text query."""
         ...
 
 class Fusion:
@@ -3464,4 +3479,3 @@ class UpdateOperation:
             vector_name: Name of the vector to delete.
         """
         ...
-

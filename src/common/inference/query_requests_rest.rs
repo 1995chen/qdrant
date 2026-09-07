@@ -273,6 +273,17 @@ fn convert_query_with_inferred(
         rest::Query::Rrf(rrf) => Ok(Query::Fusion(FusionInternal::from(rrf.rrf))),
         rest::Query::Formula(formula) => Ok(Query::Formula(FormulaInternal::from(formula))),
         rest::Query::Sample(sample) => Ok(Query::Sample(SampleInternal::from(sample.sample))),
+        rest::Query::Payload(payload) => match payload.payload {
+            rest::PayloadQueryInterface::Text(rest::TextQuery { text }) => Ok(Query::Payload(
+                shard::query::payload_query::PayloadQueryInternal::Text(
+                    shard::query::payload_query::TextQueryInternal {
+                        key: text.key,
+                        query_str: text.query_str,
+                        resolved: None,
+                    },
+                ),
+            )),
+        },
         rest::Query::RelevanceFeedback(relevance_feedback) => {
             let rest::RelevanceFeedbackInput {
                 target,
@@ -491,5 +502,26 @@ mod tests {
             },
             _ => panic!("Expected nearest query"),
         }
+    }
+
+    #[test]
+    fn test_convert_payload_text_query_keeps_payload_variant() {
+        let query = rest::QueryInterface::Query(rest::Query::Payload(rest::PayloadQuery {
+            payload: rest::PayloadQueryInterface::Text(rest::TextQuery {
+                text: rest::TextQueryInput {
+                    key: "description".parse().unwrap(),
+                    query_str: "rust search".to_string(),
+                },
+            }),
+        }));
+
+        let result = convert_query_with_inferred(query, &BatchAccumInferred::new()).unwrap();
+
+        assert!(matches!(
+            result,
+            Query::Payload(shard::query::payload_query::PayloadQueryInternal::Text(
+                shard::query::payload_query::TextQueryInternal { resolved: None, .. }
+            ))
+        ));
     }
 }

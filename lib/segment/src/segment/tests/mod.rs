@@ -3,6 +3,7 @@ mod test_immutable_payload_index_files;
 mod test_vector_name_ops;
 
 use std::assert_matches;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use ahash::AHashSet;
@@ -24,9 +25,10 @@ use super::*;
 use crate::common::operation_error::OperationError::PointIdError;
 use crate::common::{check_named_vectors, check_vector, check_vector_name};
 use crate::data_types::facets::{FacetParams, FacetValue};
+use crate::data_types::index::{TextIndexBm25Config, TextIndexParams};
 use crate::data_types::named_vectors::NamedVectors;
 use crate::data_types::order_by::OrderBy;
-use crate::data_types::query_context::QueryContext;
+use crate::data_types::query_context::{PayloadTextSearchContext, QueryContext};
 use crate::data_types::vectors::{
     DEFAULT_VECTOR_NAME, MultiDenseVectorInternal, QueryVector, VectorInternal, VectorRef,
     only_default_multi_vector, only_default_vector,
@@ -44,10 +46,10 @@ use crate::segment_constructor::simple_segment_constructor::{
 use crate::segment_constructor::{build_segment, load_segment};
 use crate::types::{
     Condition, Distance, ExtendedPointId, FieldCondition, Filter, HasIdCondition, Indexes, Match,
-    MultiVectorConfig, Payload, PayloadContainer, PayloadFieldSchema, PayloadSchemaType,
-    PointIdType, SearchParams, SnapshotFormat, SparseVectorDataConfig, SparseVectorStorageType,
-    ValueVariants, VectorDataConfig, VectorStorageDatatype, VectorStorageType, WithPayload,
-    WithVector,
+    MultiVectorConfig, Payload, PayloadContainer, PayloadFieldSchema, PayloadSchemaParams,
+    PayloadSchemaType, PointIdType, QueryTokenWeight, QueryTokenWeightSet, SearchParams,
+    SnapshotFormat, SparseVectorDataConfig, SparseVectorStorageType, ValueVariants,
+    VectorDataConfig, VectorStorageDatatype, VectorStorageType, WithPayload, WithVector,
 };
 use crate::utils::maybe_arc::MaybeArc;
 use crate::vector_storage::query::{FeedbackItem, NaiveFeedbackCoefficients, NaiveFeedbackQuery};
@@ -2269,6 +2271,62 @@ fn test_deferred_point_read_operations() {
         false,
         false,
     );
+}
+
+#[test]
+fn test_deferred_points_are_excluded_from_payload_text_search() {
+    let dir = Builder::new().prefix("segment_dir").tempdir().unwrap();
+    let mut segment = create_deferred_segment(&dir, 5, N_POINTS, 3);
+    let hw_counter = HardwareCounterCell::new();
+    let key = JsonPath::new("color");
+    let schema = PayloadFieldSchema::FieldParams(PayloadSchemaParams::Text(TextIndexParams {
+        bm25_config: Some(TextIndexBm25Config {
+            enable: Some(true),
+            k1: None,
+            b: None,
+        }),
+        ..Default::default()
+    }));
+    segment
+        .create_field_index(10_000, &key, Some(&schema), &hw_counter)
+        .unwrap();
+
+    let query = QueryTokenWeightSet::new(vec![QueryTokenWeight::new("blue".to_string(), 1.0)])
+        .with_average_document_length(1.0);
+    let results = segment
+        .search_payload_text(
+            Arc::new(PayloadTextSearchContext {
+                key,
+                query,
+                filter: None,
+                top: 100,
+                is_stopped: Arc::new(AtomicBool::new(false)),
+            }),
+            &hw_counter,
+        )
+        .unwrap();
+
+    assert_eq!(results.len(), N_POINTS.div_ceil(3));
+    assert!(
+        results
+            .iter()
+            .all(|point| !segment.point_is_deferred(point.id)),
+    );
+
+    let stats = segment
+        .payload_text_stats(
+            &JsonPath::new("color"),
+            "blue",
+            None,
+            &AtomicBool::new(false),
+            &hw_counter,
+        )
+        .unwrap();
+    assert_eq!(stats.document_count, N_POINTS);
+    assert_eq!(stats.sum_document_length, N_POINTS as u64);
+    assert_eq!(stats.document_frequencies, [N_POINTS.div_ceil(3)]);
+    assert_eq!(stats.global_document_count, N_POINTS);
+    assert_eq!(stats.global_sum_document_length, N_POINTS as u64);
 }
 
 /// A deferred point is invisible to ordinary (`VisibleOnly`) per-point reads,

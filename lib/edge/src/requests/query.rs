@@ -19,7 +19,8 @@ pub struct QueryRequest {
     /// Offset of the first result to return. May be used to paginate results.
     /// Note: large offset values may cause performance issues.
     pub offset: usize,
-    /// Search params for when there is no prefetch.
+    /// Search params for when there is no prefetch. Payload text queries use
+    /// only [`SearchParams::idf`]; vector-specific options have no effect.
     pub params: Option<SearchParams>,
     /// Options for specifying which vectors to include into the response. Default is false.
     pub with_vector: WithVector,
@@ -53,7 +54,8 @@ pub struct Prefetch {
     pub query: Option<ScoringQuery>,
     /// Max number of candidates this stage passes to its parent.
     pub limit: usize,
-    /// Additional search params.
+    /// Additional search params. Payload text queries use only
+    /// [`SearchParams::idf`]; vector-specific options have no effect.
     pub params: Option<SearchParams>,
     /// Look only for points which satisfy these conditions.
     pub filter: Option<Filter>,

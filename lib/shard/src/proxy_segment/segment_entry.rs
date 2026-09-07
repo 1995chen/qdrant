@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cmp;
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -13,7 +14,10 @@ use segment::data_types::build_index_result::BuildFieldIndexResult;
 use segment::data_types::facets::{FacetParams, FacetValue};
 use segment::data_types::named_vectors::NamedVectors;
 use segment::data_types::order_by::OrderValue;
-use segment::data_types::query_context::{FormulaContext, QueryContext, SegmentQueryContext};
+use segment::data_types::query_context::{
+    FormulaContext, PayloadTextIndexStats, PayloadTextSearchContext, QueryContext,
+    SegmentQueryContext,
+};
 use segment::data_types::segment_record::{SegmentRecord, SegmentRecordRaw};
 use segment::data_types::vector_name_config::VectorNameConfig;
 use segment::data_types::vectors::{QueryVector, VectorInternal};
@@ -38,6 +42,20 @@ impl ProxySegment {
                     .as_ref()
                     .is_some_and(|config| config.is_enabled())
         )
+    }
+
+    fn is_payload_index_stale(&self, key: &JsonPath) -> bool {
+        let Some(change) = self.changed_indexes.get(key) else {
+            return false;
+        };
+        let wrapped_schema = self.wrapped_segment.get().read().get_indexed_fields();
+        match change {
+            ProxyIndexChange::Create(schema, _) => wrapped_schema.get(key) != Some(schema),
+            ProxyIndexChange::Delete(_) => true,
+            ProxyIndexChange::DeleteIfIncompatible(_, schema) => {
+                wrapped_schema.get(key) != Some(schema)
+            }
+        }
     }
 
     /// Shared preamble of `retrieve` and `retrieve_raw`: strip any vector
@@ -269,6 +287,36 @@ impl ReadSegmentEntry for ProxySegment {
         };
 
         Ok(result)
+    }
+
+    fn search_payload_text(
+        &self,
+        ctx: Arc<PayloadTextSearchContext>,
+        hw_counter: &HardwareCounterCell,
+    ) -> OperationResult<Vec<ScoredPoint>> {
+        if self.is_payload_index_stale(&ctx.key) {
+            return Ok(vec![]);
+        }
+
+        let mut ctx = (*ctx).clone();
+        ctx.filter = ctx
+            .filter
+            .as_ref()
+            .map(|filter| self.changed_vector_names.redact_filter(filter).into_owned());
+        let ctx = if self.deleted_points.is_empty() {
+            Arc::new(ctx)
+        } else {
+            ctx.filter = Some(Self::add_deleted_points_condition_to_filter(
+                ctx.filter.map(Cow::Owned),
+                self.deleted_points.keys().copied(),
+            ));
+            Arc::new(ctx)
+        };
+
+        self.wrapped_segment
+            .get()
+            .read()
+            .search_payload_text(ctx, hw_counter)
     }
 
     fn vector(
@@ -762,6 +810,65 @@ impl ReadSegmentEntry for ProxySegment {
             .get()
             .read()
             .fill_query_context(query_context)
+    }
+
+    fn payload_text_stats(
+        &self,
+        key: &JsonPath,
+        query_str: &str,
+        corpus: Option<&Filter>,
+        is_stopped: &AtomicBool,
+        hw_counter: &HardwareCounterCell,
+    ) -> OperationResult<PayloadTextIndexStats> {
+        if self.is_payload_index_stale(key) {
+            return Ok(PayloadTextIndexStats::default());
+        }
+        let apply_overlay = |filter: &Filter| {
+            let filter = self.changed_vector_names.redact_filter(filter).into_owned();
+            if self.deleted_points.is_empty() {
+                filter
+            } else {
+                Self::add_deleted_points_condition_to_filter(
+                    Some(Cow::Owned(filter)),
+                    self.deleted_points.keys().copied(),
+                )
+            }
+        };
+
+        // With no proxy deletions, `None` preserves the wrapped segment's
+        // aggregate/posting fast path. A deletion overlay still needs an
+        // explicit global filter until the segment API can subtract those
+        // external IDs directly from its maintained aggregate.
+        let global_filter =
+            (!self.deleted_points.is_empty()).then(|| apply_overlay(&Filter::default()));
+        let corpus_filter = corpus.map(apply_overlay);
+        let wrapped = self.wrapped_segment.get();
+        let wrapped = wrapped.read();
+        let mut stats = wrapped.payload_text_stats(
+            key,
+            query_str,
+            corpus_filter.as_ref().or(global_filter.as_ref()),
+            is_stopped,
+            hw_counter,
+        )?;
+
+        if corpus_filter.is_some()
+            && let Some(global_filter) = global_filter.as_ref()
+        {
+            let global_stats = wrapped.payload_text_stats(
+                key,
+                query_str,
+                Some(global_filter),
+                is_stopped,
+                hw_counter,
+            )?;
+            stats.global_document_count = global_stats.document_count;
+            stats.global_sum_document_length = global_stats.sum_document_length;
+        } else if corpus_filter.is_none() {
+            stats.global_document_count = stats.document_count;
+            stats.global_sum_document_length = stats.sum_document_length;
+        }
+        Ok(stats)
     }
 
     fn point_is_deferred(&self, point_id: PointIdType) -> bool {

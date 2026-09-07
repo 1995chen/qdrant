@@ -516,6 +516,61 @@ fn test_sync_indexes() {
 }
 
 #[test]
+fn test_proxy_payload_text_stats_apply_overlay_without_scoping_global_average() {
+    let dir = Builder::new().prefix("segment_dir").tempdir().unwrap();
+    let original_segment = LockedSegment::new(build_segment_1(dir.path()));
+    let key = "color".parse().unwrap();
+    let schema = PayloadFieldSchema::FieldParams(PayloadSchemaParams::Text(TextIndexParams {
+        bm25_config: Some(TextIndexBm25Config {
+            enable: Some(true),
+            k1: None,
+            b: None,
+        }),
+        ..Default::default()
+    }));
+    let hw_counter = HardwareCounterCell::new();
+    original_segment
+        .get()
+        .write()
+        .create_field_index(10, &key, Some(&schema), &hw_counter)
+        .unwrap();
+
+    let mut proxy = ProxySegment::new(original_segment);
+    let is_stopped = AtomicBool::new(false);
+    let stats = proxy
+        .payload_text_stats(&key, "blue", None, &is_stopped, &hw_counter)
+        .unwrap();
+    assert_eq!(stats.document_count, 5);
+    assert_eq!(stats.sum_document_length, 7);
+    assert_eq!(stats.document_frequencies, [3]);
+    assert_eq!(stats.global_document_count, 5);
+    assert_eq!(stats.global_sum_document_length, 7);
+
+    proxy.delete_point(20, 4.into(), &hw_counter).unwrap();
+    let stats = proxy
+        .payload_text_stats(&key, "blue", None, &is_stopped, &hw_counter)
+        .unwrap();
+    assert_eq!(stats.document_count, 4);
+    assert_eq!(stats.sum_document_length, 5);
+    assert_eq!(stats.document_frequencies, [2]);
+    assert_eq!(stats.global_document_count, 4);
+    assert_eq!(stats.global_sum_document_length, 5);
+
+    let red_corpus = Filter::new_must(Condition::Field(FieldCondition::new_match(
+        key.clone(),
+        "red".to_string().into(),
+    )));
+    let stats = proxy
+        .payload_text_stats(&key, "blue", Some(&red_corpus), &is_stopped, &hw_counter)
+        .unwrap();
+    assert_eq!(stats.document_count, 3);
+    assert_eq!(stats.sum_document_length, 4);
+    assert_eq!(stats.document_frequencies, [1]);
+    assert_eq!(stats.global_document_count, 4);
+    assert_eq!(stats.global_sum_document_length, 5);
+}
+
+#[test]
 fn test_take_snapshot() {
     let dir = Builder::new().prefix("segment_dir").tempdir().unwrap();
     let original_segment = LockedSegment::new(build_segment_1(dir.path()));

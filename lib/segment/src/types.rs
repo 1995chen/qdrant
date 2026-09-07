@@ -650,7 +650,10 @@ pub struct AcornSearchParams {
     pub max_selectivity: Option<OrderedFloat<f64>>,
 }
 
-/// Additional parameters of the search
+/// Additional parameters of the search.
+///
+/// BM25 payload text queries use only [`SearchParams::idf`]. Vector-specific
+/// options are accepted for compatibility but have no effect on payload text scoring.
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Validate, Clone, PartialEq, Default, Hash)]
 #[serde(rename_all = "snake_case")]
 pub struct SearchParams {
@@ -682,16 +685,16 @@ pub struct SearchParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acorn: Option<AcornSearchParams>,
 
-    /// Which population sparse vector IDF statistics are computed over.
+    /// Which population IDF statistics are computed over.
     /// By default (or with explicit `"global"`) statistics are collection-wide.
-    /// Only applicable to sparse vectors with the IDF modifier enabled.
+    /// Applicable to sparse vectors with the IDF modifier enabled and BM25 payload text queries.
     #[serde(default)]
     #[validate(nested)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idf: Option<IdfParams>,
 }
 
-/// Population over which sparse vector IDF statistics are computed for scoring —
+/// Population over which IDF statistics are computed for scoring —
 /// the *IDF corpus*.
 ///
 /// - `"global"` — collection-wide statistics, same as omitting the parameter.

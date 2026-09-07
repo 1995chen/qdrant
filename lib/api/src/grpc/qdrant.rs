@@ -5866,8 +5866,8 @@ pub struct AcornSearchParams {
     #[validate(range(min = 0.0, max = 1.0))]
     pub max_selectivity: ::core::option::Option<f64>,
 }
-/// Population over which sparse vector IDF statistics are computed for scoring - the IDF corpus.
-/// Only applicable to sparse vectors with the IDF modifier enabled.
+/// Population over which IDF statistics are computed for scoring - the IDF corpus.
+/// Applicable to sparse vectors with the IDF modifier enabled and BM25 payload text queries.
 #[derive(validator::Validate)]
 #[derive(serde::Serialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -5878,6 +5878,8 @@ pub struct IdfParams {
     #[validate(nested)]
     pub corpus: ::core::option::Option<Filter>,
 }
+/// Additional search parameters.
+/// BM25 payload text queries use only `idf`; vector-specific options have no effect.
 #[derive(validator::Validate)]
 #[derive(serde::Serialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -5903,7 +5905,7 @@ pub struct SearchParams {
     #[prost(message, optional, tag = "5")]
     #[validate(nested)]
     pub acorn: ::core::option::Option<AcornSearchParams>,
-    /// Which population sparse vector IDF statistics are computed over.
+    /// Which population IDF statistics are computed over.
     /// If unset, statistics are collection-wide (global).
     #[prost(message, optional, tag = "6")]
     #[validate(nested)]
@@ -6808,7 +6810,7 @@ pub struct Rrf {
 #[derive(serde::Serialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Query {
-    #[prost(oneof = "query::Variant", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11")]
+    #[prost(oneof = "query::Variant", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12")]
     #[validate(nested)]
     pub variant: ::core::option::Option<query::Variant>,
 }
@@ -6850,7 +6852,37 @@ pub mod query {
         /// Search with feedback from some oracle.
         #[prost(message, tag = "11")]
         RelevanceFeedback(super::RelevanceFeedbackInput),
+        /// Search by payload content.
+        #[prost(message, tag = "12")]
+        Payload(super::PayloadQuery),
     }
+}
+#[derive(validator::Validate)]
+#[derive(serde::Serialize)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PayloadQuery {
+    #[prost(oneof = "payload_query::Variant", tags = "1")]
+    #[validate(nested)]
+    pub variant: ::core::option::Option<payload_query::Variant>,
+}
+/// Nested message and enum types in `PayloadQuery`.
+pub mod payload_query {
+    #[derive(serde::Serialize)]
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Variant {
+        #[prost(message, tag = "1")]
+        Text(super::TextQuery),
+    }
+}
+#[derive(validator::Validate)]
+#[derive(serde::Serialize)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TextQuery {
+    #[prost(string, tag = "1")]
+    pub key: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    #[validate(length(min = 1, message = "query_str can't be empty"))]
+    pub query_str: ::prost::alloc::string::String,
 }
 #[derive(validator::Validate)]
 #[derive(serde::Serialize)]
@@ -6867,14 +6899,14 @@ pub struct PrefetchQuery {
     #[validate(nested)]
     pub query: ::core::option::Option<Query>,
     /// Define which vector to use for querying.
-    /// If missing, the default vector is used.
+    /// If missing, the default vector is used. Payload queries reject a non-default value.
     #[prost(string, optional, tag = "3")]
     pub using: ::core::option::Option<::prost::alloc::string::String>,
     /// Filter conditions - return only those points that satisfy the specified conditions.
     #[prost(message, optional, tag = "4")]
     #[validate(nested)]
     pub filter: ::core::option::Option<Filter>,
-    /// Search params for when there is no prefetch.
+    /// Search params for when there is no prefetch. BM25 payload text queries use only `idf`.
     #[prost(message, optional, tag = "5")]
     #[validate(nested)]
     pub params: ::core::option::Option<SearchParams>,
@@ -6887,6 +6919,7 @@ pub struct PrefetchQuery {
     pub limit: ::core::option::Option<u64>,
     /// The location to use for IDs lookup.
     /// If not specified - use the current collection and the 'using' vector.
+    /// Payload queries do not support this option.
     #[prost(message, optional, tag = "8")]
     pub lookup_from: ::core::option::Option<LookupLocation>,
 }
@@ -6911,14 +6944,14 @@ pub struct QueryPoints {
     #[validate(nested)]
     pub query: ::core::option::Option<Query>,
     /// Define which vector to use for querying.
-    /// If missing, the default vector is used.
+    /// If missing, the default vector is used. Payload queries reject a non-default value.
     #[prost(string, optional, tag = "4")]
     pub using: ::core::option::Option<::prost::alloc::string::String>,
     /// Filter conditions - return only those points that satisfy the specified conditions.
     #[prost(message, optional, tag = "5")]
     #[validate(nested)]
     pub filter: ::core::option::Option<Filter>,
-    /// Search params for when there is no prefetch.
+    /// Search params for when there is no prefetch. BM25 payload text queries use only `idf`.
     #[prost(message, optional, tag = "6")]
     #[validate(nested)]
     pub params: ::core::option::Option<SearchParams>,
@@ -6947,6 +6980,7 @@ pub struct QueryPoints {
     pub shard_key_selector: ::core::option::Option<ShardKeySelector>,
     /// The location to use for IDs lookup.
     /// If not specified - use the current collection and the 'using' vector.
+    /// Payload queries do not support this option.
     #[prost(message, optional, tag = "14")]
     pub lookup_from: ::core::option::Option<LookupLocation>,
     /// If set, overrides global timeout setting for this request. Unit is seconds.
@@ -6996,14 +7030,14 @@ pub struct QueryPointGroups {
     #[validate(nested)]
     pub query: ::core::option::Option<Query>,
     /// Define which vector to use for querying.
-    /// If missing, the default vector is used.
+    /// If missing, the default vector is used. Payload queries reject a non-default value.
     #[prost(string, optional, tag = "4")]
     pub using: ::core::option::Option<::prost::alloc::string::String>,
     /// Filter conditions - return only those points that satisfy the specified conditions.
     #[prost(message, optional, tag = "5")]
     #[validate(nested)]
     pub filter: ::core::option::Option<Filter>,
-    /// Search params for when there is no prefetch.
+    /// Search params for when there is no prefetch. BM25 payload text queries use only `idf`.
     #[prost(message, optional, tag = "6")]
     #[validate(nested)]
     pub params: ::core::option::Option<SearchParams>,
@@ -7018,6 +7052,7 @@ pub struct QueryPointGroups {
     pub with_vectors: ::core::option::Option<WithVectorsSelector>,
     /// The location to use for IDs lookup.
     /// If not specified - use the current collection and the 'using' vector.
+    /// Payload queries do not support this option.
     #[prost(message, optional, tag = "10")]
     pub lookup_from: ::core::option::Option<LookupLocation>,
     /// Max number of points. Default is 3.
@@ -11207,6 +11242,52 @@ pub mod raw_vector {
         MultiDense(super::MultiDenseVector),
     }
 }
+#[derive(serde::Serialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RawPayloadQuery {
+    #[prost(oneof = "raw_payload_query::Variant", tags = "1")]
+    pub variant: ::core::option::Option<raw_payload_query::Variant>,
+}
+/// Nested message and enum types in `RawPayloadQuery`.
+pub mod raw_payload_query {
+    #[derive(serde::Serialize)]
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Text {
+        #[prost(string, tag = "1")]
+        pub key: ::prost::alloc::string::String,
+        #[prost(string, tag = "2")]
+        pub query_str: ::prost::alloc::string::String,
+        #[prost(message, optional, tag = "3")]
+        pub resolved: ::core::option::Option<text::Resolved>,
+    }
+    /// Nested message and enum types in `Text`.
+    pub mod text {
+        #[derive(serde::Serialize)]
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        pub struct Resolved {
+            #[prost(message, repeated, tag = "1")]
+            pub token_weights: ::prost::alloc::vec::Vec<
+                super::super::RawQueryTokenWeight,
+            >,
+            #[prost(double, optional, tag = "2")]
+            pub average_document_length: ::core::option::Option<f64>,
+        }
+    }
+    #[derive(serde::Serialize)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Variant {
+        #[prost(message, tag = "1")]
+        Text(Text),
+    }
+}
+#[derive(serde::Serialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RawQueryTokenWeight {
+    #[prost(string, tag = "1")]
+    pub token: ::prost::alloc::string::String,
+    #[prost(float, tag = "2")]
+    pub idf: f32,
+}
 /// Query variants for raw vectors (ids have been substituted with vectors)
 #[derive(serde::Serialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -11331,7 +11412,7 @@ pub mod query_shard_points {
     #[derive(serde::Serialize)]
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct Query {
-        #[prost(oneof = "query::Score", tags = "1, 2, 3, 4, 5, 6, 7")]
+        #[prost(oneof = "query::Score", tags = "1, 2, 3, 4, 5, 6, 7, 8")]
         pub score: ::core::option::Option<query::Score>,
     }
     /// Nested message and enum types in `Query`.
@@ -11360,6 +11441,9 @@ pub mod query_shard_points {
             /// Parameterized RRF fusion
             #[prost(message, tag = "7")]
             Rrf(super::super::Rrf),
+            /// Score by payload query
+            #[prost(message, tag = "8")]
+            Payload(super::super::RawPayloadQuery),
         }
     }
     #[derive(serde::Serialize)]

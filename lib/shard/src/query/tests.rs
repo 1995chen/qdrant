@@ -12,6 +12,14 @@ use sparse::common::sparse_vector::SparseVector;
 use super::planned_query::*;
 use super::*;
 
+fn payload_text(query_str: &str) -> PayloadQueryInternal {
+    PayloadQueryInternal::Text(TextQueryInternal {
+        key: JsonPath::new("description"),
+        query_str: query_str.to_string(),
+        resolved: None,
+    })
+}
+
 #[test]
 fn test_try_from_double_rescore() {
     let dummy_vector = vec![1.0, 2.0, 3.0];
@@ -201,6 +209,95 @@ fn test_try_from_no_prefetch() {
                 rescore_stages: None,
             },
         }]
+    );
+}
+
+#[test]
+fn payload_query_is_lowered_only_at_a_search_leaf() {
+    let payload_query = payload_text("rust search");
+    let PayloadQueryInternal::Text(expected_text_query) = payload_query.clone();
+    let request = ShardQueryRequest {
+        prefetches: vec![],
+        query: Some(ScoringQuery::Payload(payload_query)),
+        filter: Some(Filter::default()),
+        score_threshold: None,
+        limit: 10,
+        offset: 0,
+        params: None,
+        with_vector: WithVector::Bool(false),
+        with_payload: WithPayloadInterface::Bool(false),
+    };
+
+    let planned_query = PlannedQuery::try_from(vec![request]).unwrap();
+
+    assert_eq!(planned_query.searches.len(), 1);
+    assert_eq!(
+        planned_query.searches[0].query,
+        QueryEnum::Text(expected_text_query)
+    );
+    assert!(
+        planned_query.root_plans[0]
+            .merge_plan
+            .rescore_stages
+            .is_none()
+    );
+}
+
+#[test]
+fn payload_query_remains_a_payload_variant_when_it_rescores_prefetches() {
+    let payload_query = payload_text("rust search");
+    let request = ShardQueryRequest {
+        prefetches: vec![ShardPrefetch {
+            prefetches: vec![],
+            query: None,
+            filter: None,
+            score_threshold: None,
+            limit: 20,
+            params: None,
+        }],
+        query: Some(ScoringQuery::Payload(payload_query.clone())),
+        filter: None,
+        score_threshold: None,
+        limit: 10,
+        offset: 0,
+        params: None,
+        with_vector: WithVector::Bool(false),
+        with_payload: WithPayloadInterface::Bool(false),
+    };
+
+    let planned_query = PlannedQuery::try_from(vec![request]).unwrap();
+
+    assert!(planned_query.searches.is_empty());
+    assert_eq!(planned_query.scrolls.len(), 1);
+    let rescore = planned_query.root_plans[0]
+        .merge_plan
+        .rescore_stages
+        .as_ref()
+        .and_then(|stages| stages.shard_level.as_ref())
+        .expect("payload query must be planned as a shard-level rescore");
+    assert_eq!(rescore.rescore, ScoringQuery::Payload(payload_query));
+}
+
+#[test]
+fn text_query_cannot_be_wrapped_as_a_vector_scoring_query() {
+    let PayloadQueryInternal::Text(text_query) = payload_text("rust search");
+    let request = ShardQueryRequest {
+        prefetches: vec![],
+        query: Some(ScoringQuery::Vector(QueryEnum::Text(text_query))),
+        filter: None,
+        score_threshold: None,
+        limit: 10,
+        offset: 0,
+        params: None,
+        with_vector: WithVector::Bool(false),
+        with_payload: WithPayloadInterface::Bool(false),
+    };
+
+    let error = PlannedQuery::try_from(vec![request]).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("payload text queries must use the payload scoring variant")
     );
 }
 

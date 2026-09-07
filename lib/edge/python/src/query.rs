@@ -11,6 +11,7 @@ use segment::data_types::order_by::{Direction, OrderBy, OrderByInterface, StartF
 use segment::data_types::vectors::{DEFAULT_VECTOR_NAME, VectorInternal};
 use segment::index::query_optimization::rescore_formula::parsed_formula::ParsedFormula;
 use segment::json_path::JsonPath;
+use shard::query::payload_query::PayloadQueryInternal;
 use shard::query::query_enum::QueryEnum;
 use shard::query::*;
 
@@ -235,6 +236,7 @@ impl FromPyObject<'_, '_> for PyScoringQuery {
         #[derive(FromPyObject)]
         enum Helper {
             Vector(PyQuery),
+            Payload(PyPayloadQuery),
             Fusion(PyFusion),
             OrderBy(PyOrderBy),
             Formula(PyFormula),
@@ -245,6 +247,7 @@ impl FromPyObject<'_, '_> for PyScoringQuery {
         fn _variants(query: ScoringQuery) {
             match query {
                 ScoringQuery::Vector(_) => {}
+                ScoringQuery::Payload(_) => {}
                 ScoringQuery::Fusion(_) => {}
                 ScoringQuery::OrderBy(_) => {}
                 ScoringQuery::Formula(_) => {}
@@ -255,6 +258,7 @@ impl FromPyObject<'_, '_> for PyScoringQuery {
 
         let query = match query.extract()? {
             Helper::Vector(query) => ScoringQuery::Vector(QueryEnum::from(query)),
+            Helper::Payload(query) => ScoringQuery::Payload(PayloadQueryInternal::from(query)),
             Helper::Fusion(fusion) => ScoringQuery::Fusion(FusionInternal::from(fusion)),
             Helper::OrderBy(order_by) => ScoringQuery::OrderBy(OrderBy::from(order_by)),
             Helper::Formula(formula) => ScoringQuery::Formula(ParsedFormula::from(formula)),
@@ -274,6 +278,7 @@ impl<'py> IntoPyObject<'py> for PyScoringQuery {
     fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
         match self.0 {
             ScoringQuery::Vector(vector) => PyQuery(vector).into_bound_py_any(py),
+            ScoringQuery::Payload(payload) => PyPayloadQuery(payload).into_bound_py_any(py),
             ScoringQuery::Fusion(fusion) => PyFusion::from(fusion).into_bound_py_any(py),
             ScoringQuery::OrderBy(order_by) => PyOrderBy(order_by).into_bound_py_any(py),
             ScoringQuery::Formula(formula) => PyFormula(formula).into_bound_py_any(py),
@@ -297,6 +302,7 @@ impl Repr for PyScoringQuery {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match &self.0 {
             ScoringQuery::Vector(vector) => PyQuery::wrap_ref(vector).fmt(f),
+            ScoringQuery::Payload(payload) => PyPayloadQuery::wrap_ref(payload).fmt(f),
             ScoringQuery::Fusion(fusion) => PyFusion::from(fusion.clone()).fmt(f),
             ScoringQuery::OrderBy(order_by) => PyOrderBy::wrap_ref(order_by).fmt(f),
             ScoringQuery::Formula(_formula) => f.unimplemented(), // TODO!

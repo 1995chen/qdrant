@@ -136,6 +136,7 @@ impl PlannedQuery {
         let with_vector = match &query {
             None
             | Some(ScoringQuery::Vector(_))
+            | Some(ScoringQuery::Payload(_))
             | Some(ScoringQuery::Fusion(_))
             | Some(ScoringQuery::OrderBy(_))
             | Some(ScoringQuery::Formula(_))
@@ -185,6 +186,7 @@ impl PlannedQuery {
         let rescore_stages = match &query {
             None => None,
             Some(ScoringQuery::Vector(_)) => None,
+            Some(ScoringQuery::Payload(_)) => None,
             Some(ScoringQuery::Fusion(_)) => None, // Expect fusion to have prefetches
             Some(ScoringQuery::OrderBy(_)) => None,
             Some(ScoringQuery::Formula(_)) => None,
@@ -205,6 +207,7 @@ impl PlannedQuery {
         let leaf_fetches = match &query {
             None | Some(ScoringQuery::OrderBy(_)) | Some(ScoringQuery::Sample(_)) => true,
             Some(ScoringQuery::Vector(_))
+            | Some(ScoringQuery::Payload(_))
             | Some(ScoringQuery::Fusion(_))
             | Some(ScoringQuery::Formula(_))
             | Some(ScoringQuery::Mmr(_)) => false,
@@ -291,6 +294,7 @@ impl PlannedQuery {
                 })
             }
             rescore @ (ScoringQuery::Vector(_)
+            | ScoringQuery::Payload(_)
             | ScoringQuery::OrderBy(_)
             | ScoringQuery::Formula(_)
             | ScoringQuery::Sample(_)) => Some(RescoreStages::shard_level(RescoreParams {
@@ -406,9 +410,31 @@ fn leaf_source_from_scoring_query(
     with_payload: WithPayloadInterface,
 ) -> OperationResult<Source> {
     let source = match query {
+        Some(ScoringQuery::Vector(QueryEnum::Text(_))) => {
+            return Err(OperationError::validation_error(
+                "payload text queries must use the payload scoring variant",
+            ));
+        }
         Some(ScoringQuery::Vector(query_enum)) => {
             let core_search = CoreSearchRequest {
                 query: query_enum,
+                filter,
+                params,
+                limit,
+                offset: 0,
+                with_vector: Some(with_vector),
+                with_payload: Some(with_payload),
+                score_threshold,
+            };
+
+            let idx = core_searches.len();
+            core_searches.push(core_search);
+
+            Source::SearchesIdx(idx)
+        }
+        Some(ScoringQuery::Payload(payload_query)) => {
+            let core_search = CoreSearchRequest {
+                query: QueryEnum::from(payload_query),
                 filter,
                 params,
                 limit,

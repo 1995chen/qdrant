@@ -5,8 +5,13 @@ use common::budget::ResourceBudget;
 use common::counter::hardware_accumulator::HwMeasurementAcc;
 use common::save_on_disk::SaveOnDisk;
 use segment::common::reciprocal_rank_fusion::DEFAULT_RRF_K;
+use segment::data_types::index::{TextIndexBm25Config, TextIndexParams};
 use segment::data_types::vectors::{DEFAULT_VECTOR_NAME, NamedQuery, VectorInternal};
-use segment::types::{PointIdType, WithPayloadInterface, WithVector};
+use segment::json_path::JsonPath;
+use segment::types::{
+    PayloadFieldSchema, PayloadSchemaParams, PointIdType, WithPayloadInterface, WithVector,
+};
+use shard::query::payload_query::{PayloadQueryInternal, TextQueryInternal};
 use shard::query::query_enum::QueryEnum;
 use tempfile::Builder;
 use tokio::runtime::Handle;
@@ -17,9 +22,97 @@ use crate::operations::types::CollectionError;
 use crate::operations::universal_query::shard_query::{
     FusionInternal, ScoringQuery, ShardPrefetch, ShardQueryRequest,
 };
+use crate::operations::{CollectionUpdateOperations, CreateIndex, FieldIndexOperations};
 use crate::shards::local_shard::LocalShard;
 use crate::shards::shard_trait::{ShardOperation, WaitUntil};
 use crate::tests::fixtures::*;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_local_shard_resolves_unresolved_text_query() {
+    let collection_dir = Builder::new().prefix("test_collection").tempdir().unwrap();
+    let config = create_collection_config();
+    let current_runtime = AdaptiveSearchHandle::current_for_tests();
+    let payload_index_schema_dir = Builder::new().prefix("qdrant-test").tempdir().unwrap();
+    let payload_index_schema_file = payload_index_schema_dir.path().join("payload-schema.json");
+    let payload_index_schema =
+        Arc::new(SaveOnDisk::load_or_init_default(payload_index_schema_file).unwrap());
+    let shard = LocalShard::build(
+        0,
+        "test".to_string(),
+        collection_dir.path(),
+        Arc::new(RwLock::new(config.clone())),
+        Arc::new(Default::default()),
+        Arc::clone(&payload_index_schema),
+        Handle::current(),
+        current_runtime.clone(),
+        ResourceBudget::default(),
+        config.optimizer_config.clone(),
+    )
+    .await
+    .unwrap();
+
+    let field_name = JsonPath::new("description");
+    let field_schema =
+        PayloadFieldSchema::FieldParams(PayloadSchemaParams::Text(TextIndexParams {
+            bm25_config: Some(TextIndexBm25Config {
+                enable: Some(true),
+                k1: None,
+                b: None,
+            }),
+            ..Default::default()
+        }));
+    payload_index_schema
+        .write(|schema| {
+            schema
+                .schema
+                .insert(field_name.clone(), field_schema.clone());
+        })
+        .unwrap();
+    shard
+        .update(
+            CollectionUpdateOperations::FieldIndexOperation(FieldIndexOperations::CreateIndex(
+                CreateIndex {
+                    field_name: field_name.clone(),
+                    field_schema: Some(field_schema),
+                },
+            ))
+            .into(),
+            WaitUntil::Visible,
+            None,
+            HwMeasurementAcc::new(),
+        )
+        .await
+        .unwrap();
+
+    let request = ShardQueryRequest {
+        prefetches: vec![],
+        query: Some(ScoringQuery::Payload(PayloadQueryInternal::Text(
+            TextQueryInternal {
+                key: field_name,
+                query_str: "distributed text".to_string(),
+                resolved: None,
+            },
+        ))),
+        filter: None,
+        score_threshold: None,
+        limit: 10,
+        offset: 0,
+        params: None,
+        with_vector: WithVector::Bool(false),
+        with_payload: WithPayloadInterface::Bool(false),
+    };
+
+    let response = shard
+        .query_batch(
+            Arc::new(vec![request]),
+            &current_runtime,
+            None,
+            HwMeasurementAcc::new(),
+        )
+        .await
+        .unwrap();
+    assert!(response.into_iter().flatten().flatten().next().is_none());
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_shard_query_rrf_rescoring() {

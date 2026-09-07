@@ -88,8 +88,8 @@ mod qdrant_edge {
     #[pymodule_export]
     use super::types::query::{
         PyContextPair, PyContextQuery, PyDiscoverQuery, PyFeedbackItem, PyFeedbackNaiveQuery,
-        PyNaiveFeedbackCoefficients, PyPayloadSelectorInterface, PyQueryInterface,
-        PyRecommendQuery,
+        PyNaiveFeedbackCoefficients, PyPayloadQueryInterface, PyPayloadSelectorInterface,
+        PyQueryInterface, PyRecommendQuery,
     };
     #[pymodule_export]
     use super::types::{PyPoint, PyPointVectors, PyRecord, PyScoredPoint, PySparseVector};

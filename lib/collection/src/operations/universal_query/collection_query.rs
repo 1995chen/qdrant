@@ -16,6 +16,7 @@ use segment::vector_storage::query::{
     avg_vector_for_recommendation,
 };
 use serde::Serialize;
+use shard::query::payload_query::PayloadQueryInternal;
 use shard::query::query_enum::QueryEnum;
 
 use super::formula::FormulaInternal;
@@ -102,6 +103,9 @@ pub enum Query {
 
     /// Sample points
     Sample(SampleInternal),
+
+    /// Score points using a payload index.
+    Payload(PayloadQueryInternal),
 }
 
 impl Query {
@@ -126,6 +130,7 @@ impl Query {
             Query::OrderBy(order_by) => ScoringQuery::OrderBy(order_by),
             Query::Formula(formula) => ScoringQuery::Formula(ParsedFormula::try_from(formula)?),
             Query::Sample(sample) => ScoringQuery::Sample(sample),
+            Query::Payload(payload) => ScoringQuery::Payload(payload),
         };
 
         Ok(scoring_query)
@@ -138,7 +143,11 @@ impl Query {
                 .into_iter()
                 .copied()
                 .collect(),
-            Self::Fusion(_) | Self::OrderBy(_) | Self::Formula(_) | Self::Sample(_) => Vec::new(),
+            Self::Fusion(_)
+            | Self::OrderBy(_)
+            | Self::Formula(_)
+            | Self::Sample(_)
+            | Self::Payload(_) => Vec::new(),
         }
     }
 }
@@ -573,6 +582,7 @@ impl CollectionPrefetch {
         CollectionQueryRequest::validation(
             &self.query,
             &self.using,
+            self.lookup_from.as_ref(),
             &self.prefetch,
             self.score_threshold.map(OrderedFloat::into_inner),
         )?;
@@ -682,6 +692,7 @@ impl CollectionQueryRequest {
         Self::validation(
             &self.query,
             &self.using,
+            self.lookup_from.as_ref(),
             &self.prefetch,
             self.score_threshold,
         )?;
@@ -739,6 +750,7 @@ impl CollectionQueryRequest {
     pub fn validation(
         query: &Option<Query>,
         using: &VectorNameBuf,
+        lookup_from: Option<&LookupLocation>,
         prefetch: &[CollectionPrefetch],
         score_threshold: Option<ScoreType>,
     ) -> CollectionResult<()> {
@@ -775,6 +787,19 @@ impl CollectionQueryRequest {
             ));
         }
 
+        if let Some(Query::Payload(_)) = query {
+            if using != DEFAULT_VECTOR_NAME {
+                return Err(CollectionError::bad_request(
+                    "Payload queries cannot be combined with the 'using' field.",
+                ));
+            }
+            if lookup_from.is_some() {
+                return Err(CollectionError::bad_request(
+                    "Payload queries cannot be combined with the 'lookup_from' field.",
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -782,6 +807,7 @@ impl CollectionQueryRequest {
 #[cfg(test)]
 mod tests {
     use segment::data_types::vectors::VectorStructInternal;
+    use shard::query::payload_query::TextQueryInternal;
     use shard::retrieve::record_internal::RecordInternal;
 
     use super::*;
@@ -798,6 +824,123 @@ mod tests {
         };
         referenced.extend(None, vec![(point_id, record)]);
         referenced
+    }
+
+    fn payload_text_query() -> Query {
+        Query::Payload(PayloadQueryInternal::Text(TextQueryInternal {
+            key: JsonPath::new("description"),
+            query_str: "rust search".to_string(),
+            resolved: None,
+        }))
+    }
+
+    fn root_request(query: Query) -> CollectionQueryRequest {
+        CollectionQueryRequest {
+            prefetch: vec![],
+            query: Some(query),
+            using: DEFAULT_VECTOR_NAME.to_string(),
+            filter: None,
+            score_threshold: None,
+            limit: 10,
+            offset: 0,
+            params: None,
+            with_vector: WithVector::Bool(false),
+            with_payload: WithPayloadInterface::Bool(false),
+            lookup_from: None,
+        }
+    }
+
+    fn prefetch(query: Query) -> CollectionPrefetch {
+        CollectionPrefetch {
+            prefetch: vec![],
+            query: Some(query),
+            using: DEFAULT_VECTOR_NAME.to_string(),
+            filter: None,
+            score_threshold: None,
+            limit: 10,
+            params: None,
+            lookup_from: None,
+        }
+    }
+
+    fn lookup_location() -> LookupLocation {
+        LookupLocation {
+            collection: "lookup".to_string(),
+            vector: None,
+            shard_key: None,
+        }
+    }
+
+    #[test]
+    fn payload_text_root_query_converts_to_payload_scoring_query() {
+        let request = root_request(payload_text_query())
+            .try_into_shard_request("collection", &ReferencedVectors::default())
+            .unwrap();
+
+        assert!(matches!(
+            request.query,
+            Some(ScoringQuery::Payload(PayloadQueryInternal::Text(_)))
+        ));
+    }
+
+    #[test]
+    fn payload_text_root_query_rejects_non_default_using() {
+        let mut request = root_request(payload_text_query());
+        request.using = "dense".to_string();
+
+        let error = request
+            .try_into_shard_request("collection", &ReferencedVectors::default())
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Payload queries cannot be combined with the 'using' field.")
+        );
+    }
+
+    #[test]
+    fn payload_text_root_query_rejects_lookup_from() {
+        let mut request = root_request(payload_text_query());
+        request.lookup_from = Some(lookup_location());
+
+        let error = request
+            .try_into_shard_request("collection", &ReferencedVectors::default())
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Payload queries cannot be combined with the 'lookup_from' field.")
+        );
+    }
+
+    #[test]
+    fn payload_text_prefetch_rejects_non_default_using() {
+        let mut prefetch = prefetch(payload_text_query());
+        prefetch.using = "dense".to_string();
+
+        let error = prefetch
+            .try_into_shard_prefetch(&ReferencedVectors::default())
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Payload queries cannot be combined with the 'using' field.")
+        );
+    }
+
+    #[test]
+    fn payload_text_prefetch_rejects_lookup_from() {
+        let mut prefetch = prefetch(payload_text_query());
+        prefetch.lookup_from = Some(lookup_location());
+
+        let error = prefetch
+            .try_into_shard_prefetch(&ReferencedVectors::default())
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Payload queries cannot be combined with the 'lookup_from' field.")
+        );
     }
 
     #[test]

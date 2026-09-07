@@ -13,6 +13,7 @@ use segment::common::reciprocal_rank_fusion::rrf_scoring;
 use segment::common::score_fusion::{ScoreFusion, score_fusion};
 use segment::types::{Filter, HasIdCondition, ScoredPoint, WithPayloadInterface, WithVector};
 use shard::query::planned_query::RescoreStages;
+use shard::query::query_enum::QueryEnum;
 use shard::search::CoreSearchRequestBatch;
 
 use super::LocalShard;
@@ -364,6 +365,36 @@ impl LocalShard {
                 .ok_or_else(|| {
                     CollectionError::service_error(
                         "Rescoring with vector(s) query didn't return expected batch of results",
+                    )
+                })
+            }
+            ScoringQuery::Payload(payload_query) => {
+                let filter = filter_with_sources_ids(sources.into_iter());
+                let search_request = CoreSearchRequest {
+                    query: QueryEnum::from(payload_query),
+                    filter: Some(filter),
+                    params,
+                    limit,
+                    offset: 0,
+                    with_payload: None,
+                    with_vector: None,
+                    score_threshold: score_threshold.map(OrderedFloat::into_inner),
+                };
+                let rescoring_core_search_request = CoreSearchRequestBatch {
+                    searches: vec![search_request],
+                };
+
+                self.do_search(
+                    Arc::new(rescoring_core_search_request),
+                    search_runtime_handle,
+                    timeout,
+                    hw_counter_acc,
+                )
+                .await?
+                .pop()
+                .ok_or_else(|| {
+                    CollectionError::service_error(
+                        "Rescoring with a payload query didn't return expected batch of results",
                     )
                 })
             }

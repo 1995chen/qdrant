@@ -123,7 +123,10 @@ impl Collection {
 
             let is_exact = request.params.as_ref().is_some_and(|p| p.exact);
 
-            if is_exact || request_limit < Self::SHARD_QUERY_SUBSAMPLING_LIMIT {
+            if is_exact
+                || new_request.has_text_query()
+                || request_limit < Self::SHARD_QUERY_SUBSAMPLING_LIMIT
+            {
                 new_requests.push(new_request);
                 continue;
             }
@@ -309,7 +312,6 @@ impl Collection {
         hw_measurement_acc: HwMeasurementAcc,
     ) -> CollectionResult<Vec<Vec<ScoredPoint>>> {
         let instant = Instant::now();
-
         let requests_batch = Arc::new(requests_batch);
 
         let all_shards_results = self
@@ -432,6 +434,7 @@ impl Collection {
             }
             None
             | Some(ScoringQuery::Vector(_))
+            | Some(ScoringQuery::Payload(_))
             | Some(ScoringQuery::OrderBy(_))
             | Some(ScoringQuery::Formula(_))
             | Some(ScoringQuery::Sample(_)) => {
@@ -750,6 +753,7 @@ fn intermediate_query_infos(request: &ShardQueryRequest) -> Vec<IntermediateQuer
         }
         None
         | Some(ScoringQuery::Vector(_))
+        | Some(ScoringQuery::Payload(_))
         | Some(ScoringQuery::OrderBy(_))
         | Some(ScoringQuery::Formula(_))
         | Some(ScoringQuery::Sample(_)) => {

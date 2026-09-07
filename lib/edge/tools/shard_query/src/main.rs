@@ -653,8 +653,8 @@ type Row = (String, serde_json::Value);
 /// A read request parsed once from the CLI args, so every live-reload
 /// iteration re-runs exactly the same request.
 enum PreparedRequest {
-    Scroll(ScrollRequest),
-    Search(SearchRequest),
+    Scroll(Box<ScrollRequest>),
+    Search(Box<SearchRequest>),
 }
 
 impl PreparedRequest {
@@ -680,14 +680,14 @@ impl PreparedRequest {
                     })
                     .transpose()?;
 
-                Ok(Self::Scroll(ScrollRequest {
+                Ok(Self::Scroll(Box::new(ScrollRequest {
                     offset,
                     limit: Some(args.common.limit),
                     filter,
                     with_payload: Some(WithPayloadInterface::Bool(true)),
                     with_vector: args.common.with_vectors.into(),
                     order_by,
-                }))
+                })))
             }
             Command::Search(args) => {
                 let filter = args.common.resolve_filter()?;
@@ -721,7 +721,7 @@ impl PreparedRequest {
                     ..Default::default()
                 });
 
-                Ok(Self::Search(SearchRequest {
+                Ok(Self::Search(Box::new(SearchRequest {
                     query,
                     filter,
                     params,
@@ -730,7 +730,7 @@ impl PreparedRequest {
                     with_payload: Some(WithPayloadInterface::Bool(true)),
                     with_vector: Some(args.common.with_vectors.into()),
                     score_threshold: args.score_threshold,
-                }))
+                })))
             }
             Command::SearchSparse(args) => {
                 let filter = args.common.resolve_filter()?;
@@ -757,7 +757,7 @@ impl PreparedRequest {
                     ..Default::default()
                 });
 
-                Ok(Self::Search(SearchRequest {
+                Ok(Self::Search(Box::new(SearchRequest {
                     query,
                     filter,
                     params,
@@ -766,7 +766,7 @@ impl PreparedRequest {
                     with_payload: Some(WithPayloadInterface::Bool(true)),
                     with_vector: Some(args.common.with_vectors.into()),
                     score_threshold: args.score_threshold,
-                }))
+                })))
             }
         }
     }
@@ -818,14 +818,14 @@ impl PreparedRequest {
         match self {
             Self::Scroll(request) => {
                 let (records, next_offset) = shard
-                    .scroll(request.clone())
+                    .scroll(*request.clone())
                     .context("scroll request failed")?;
                 let rows = records.iter().map(record_row).collect::<Result<_>>()?;
                 Ok((rows, next_offset))
             }
             Self::Search(request) => {
                 let points = shard
-                    .search(request.clone())
+                    .search(*request.clone())
                     .context("search request failed")?;
                 let rows = points.iter().map(scored_point_row).collect::<Result<_>>()?;
                 Ok((rows, None))

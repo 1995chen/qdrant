@@ -62,7 +62,12 @@ impl MergePlan {
 
 fn validate_query(query: &ScoringQuery, sources: &[Source]) -> OperationResult<()> {
     match query {
-        ScoringQuery::Vector(_) => Ok(()),
+        ScoringQuery::Vector(super::query_enum::QueryEnum::Text(_)) => {
+            Err(OperationError::validation_error(
+                "payload text queries must use the payload scoring variant",
+            ))
+        }
+        ScoringQuery::Vector(_) | ScoringQuery::Payload(_) => Ok(()),
         ScoringQuery::Fusion(fusion) => validate_fusion(fusion, sources.len()),
         ScoringQuery::OrderBy(_) => Ok(()),
         ScoringQuery::Formula(_) => Ok(()),

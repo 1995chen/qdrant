@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,6 +36,26 @@ use crate::shards::local_shard::LocalShard;
 use crate::shards::shard_trait::{ShardOperation, WaitUntil};
 use crate::update_handler::{OperationData, UpdateSignal};
 use crate::update_workers::internal_update_result::InternalUpdateResult;
+
+/// Additional read-rate cost of resolving the distinct payload text queries in a batch.
+///
+/// Payload text queries used for rescoring are not present in [`PlannedQuery::searches`], but
+/// collecting their shard-local statistics still scans the relevant text postings (and, for an
+/// explicit IDF corpus, evaluates its filter). Account for that work separately while deduplicating
+/// requests that can share the same statistics.
+fn text_query_stats_rate_cost(requests: &[ShardQueryRequest]) -> Option<usize> {
+    let stats_requests = requests
+        .iter()
+        .flat_map(ShardQueryRequest::text_query_stats_requests)
+        .collect::<HashSet<_>>();
+
+    (!stats_requests.is_empty()).then(|| {
+        stats_requests.into_iter().fold(0usize, |cost, request| {
+            let corpus_cost = request.corpus.as_ref().map_or(0, filter_rate_cost);
+            cost.saturating_add(BASE_COST).saturating_add(corpus_cost)
+        })
+    })
+}
 
 /// Outcome of submitting an update to the worker queue.
 pub enum SubmitOutcome {
@@ -373,7 +394,7 @@ impl ShardOperation for LocalShard {
     ) -> CollectionResult<Vec<Vec<ScoredPoint>>> {
         // Check read rate limiter before proceeding
         self.check_read_rate_limiter(&hw_measurement_acc, "core_search", || {
-            request.searches.iter().map(|s| s.search_rate_cost()).sum()
+            request.searches.iter().map(|s| s.query_rate_cost()).sum()
         })?;
         let timeout = self.timeout_or_default_search_timeout(timeout);
         self.do_search(request, search_runtime_handle, timeout, hw_measurement_acc)
@@ -499,18 +520,43 @@ impl ShardOperation for LocalShard {
         hw_measurement_acc: HwMeasurementAcc,
     ) -> CollectionResult<Vec<ShardQueryResponse>> {
         let start_time = Instant::now();
-        let planned_query = PlannedQuery::try_from(requests.as_ref().to_owned())?;
+        let original_timeout = self.timeout_or_default_search_timeout(timeout);
+        let rate_cost_plan = PlannedQuery::try_from(requests.as_ref().to_owned())?;
+        let text_query_stats_rate_cost = text_query_stats_rate_cost(requests.as_ref());
 
         // Check read rate limiter before proceeding
         self.check_read_rate_limiter(&hw_measurement_acc, "query_batch", || {
-            planned_query
+            let plan_cost = rate_cost_plan
                 .searches
                 .iter()
-                .map(|s| s.search_rate_cost())
-                .chain(planned_query.scrolls.iter().map(|s| s.scroll_rate_cost()))
-                .sum()
+                .map(|s| s.query_rate_cost())
+                .chain(rate_cost_plan.scrolls.iter().map(|s| s.scroll_rate_cost()))
+                .fold(0usize, usize::saturating_add);
+            plan_cost.saturating_add(text_query_stats_rate_cost.unwrap_or_default())
         })?;
-        let timeout = self.timeout_or_default_search_timeout(timeout);
+
+        let planned_query = if text_query_stats_rate_cost.is_some() {
+            // The rate-cost plan owns a deep clone of the batch. Release it before cloning and
+            // resolving the text queries so both complete plans are not retained at once.
+            drop(rate_cost_plan);
+
+            let mut resolved_requests = requests.as_ref().to_owned();
+            let stopping_guard = shard::common::stopping_guard::StoppingGuard::new();
+            self.resolve_text_queries(
+                &mut resolved_requests,
+                original_timeout.saturating_sub(start_time.elapsed()),
+                hw_measurement_acc.clone(),
+                stopping_guard.get_is_stopped(),
+            )
+            .await?;
+            PlannedQuery::try_from(resolved_requests)?
+        } else {
+            // No text statistics need to be injected, so the plan built for rate limiting is also
+            // the execution plan. This keeps ordinary queries on the existing single-plan path.
+            rate_cost_plan
+        };
+        // Include both statistics resolution and the second planning pass in the request timeout.
+        let timeout = original_timeout.saturating_sub(start_time.elapsed());
         let cpu_utilization = hw_measurement_acc.cpu_utilization();
         let result = self
             .do_planned_query(
@@ -684,5 +730,103 @@ impl LocalShard {
             deferred_behavior,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use segment::json_path::JsonPath;
+    use segment::types::{Condition, FieldCondition, IdfCorpusParams, IdfParams, SearchParams};
+    use shard::query::payload_query::{PayloadQueryInternal, TextQueryInternal};
+    use shard::query::{ScoringQuery, ShardPrefetch};
+
+    use super::*;
+
+    fn tenant_corpus(tenant: &str) -> Filter {
+        Filter::new_must(Condition::Field(FieldCondition::new_match(
+            JsonPath::new("tenant"),
+            tenant.to_string().into(),
+        )))
+    }
+
+    fn corpus_params(corpus: Filter) -> SearchParams {
+        SearchParams {
+            idf: Some(IdfParams::Corpus(IdfCorpusParams { corpus })),
+            ..Default::default()
+        }
+    }
+
+    fn text_query(query_str: &str) -> ScoringQuery {
+        ScoringQuery::Payload(PayloadQueryInternal::Text(TextQueryInternal {
+            key: JsonPath::new("description"),
+            query_str: query_str.to_string(),
+            resolved: None,
+        }))
+    }
+
+    fn text_rescore_request(root_corpus: Filter, prefetch_corpus: Filter) -> ShardQueryRequest {
+        ShardQueryRequest {
+            prefetches: vec![ShardPrefetch {
+                prefetches: vec![],
+                query: Some(text_query("shared query")),
+                limit: 10,
+                params: Some(corpus_params(prefetch_corpus)),
+                filter: None,
+                score_threshold: None,
+            }],
+            query: Some(text_query("shared query")),
+            filter: None,
+            score_threshold: None,
+            limit: 10,
+            offset: 0,
+            params: Some(corpus_params(root_corpus)),
+            with_vector: WithVector::Bool(false),
+            with_payload: WithPayloadInterface::Bool(false),
+        }
+    }
+
+    #[test]
+    fn text_query_stats_rate_cost_deduplicates_nested_requests() {
+        let corpus = tenant_corpus("a");
+        let request = text_rescore_request(corpus.clone(), corpus.clone());
+
+        assert_eq!(
+            text_query_stats_rate_cost(&[request]),
+            Some(BASE_COST + filter_rate_cost(&corpus)),
+        );
+    }
+
+    #[test]
+    fn text_query_stats_rate_cost_keeps_distinct_corpora() {
+        let first_corpus = tenant_corpus("a");
+        let second_corpus = tenant_corpus("b");
+        let request = text_rescore_request(first_corpus.clone(), second_corpus.clone());
+
+        assert_eq!(
+            text_query_stats_rate_cost(&[request]),
+            Some(
+                BASE_COST
+                    + filter_rate_cost(&first_corpus)
+                    + BASE_COST
+                    + filter_rate_cost(&second_corpus)
+            ),
+        );
+    }
+
+    #[test]
+    fn text_query_stats_rate_cost_is_absent_without_text_queries() {
+        let request = ShardQueryRequest {
+            prefetches: vec![],
+            query: None,
+            filter: None,
+            score_threshold: None,
+            limit: 10,
+            offset: 0,
+            params: None,
+            with_vector: WithVector::Bool(false),
+            with_payload: WithPayloadInterface::Bool(false),
+        };
+
+        assert_eq!(text_query_stats_rate_cost(&[request]), None);
     }
 }

@@ -10,7 +10,7 @@ use shard::search::search_load_profile;
 /// [`QueryRequest`](crate::QueryRequest) and [`EdgeShardRead::query`](crate::EdgeShardRead::query).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchRequest {
-    /// Every kind of query that can be performed on segment level.
+    /// Vector query to execute. Payload queries must use [`QueryRequest`].
     pub query: QueryEnum,
     /// Look only for points which satisfy these conditions.
     pub filter: Option<Filter>,

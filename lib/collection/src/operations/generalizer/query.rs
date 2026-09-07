@@ -73,6 +73,7 @@ impl Generalizer for ScoringQuery {
     fn remove_details(&self) -> Self {
         match self {
             ScoringQuery::Vector(vector) => ScoringQuery::Vector(vector.remove_details()),
+            ScoringQuery::Payload(_) => self.clone(),
             ScoringQuery::Fusion(_) => self.clone(),
             ScoringQuery::OrderBy(_) => self.clone(),
             ScoringQuery::Formula(_) => self.clone(),
@@ -115,6 +116,7 @@ impl Generalizer for QueryEnum {
             QueryEnum::FeedbackNaive(feedback) => {
                 QueryEnum::FeedbackNaive(feedback.remove_details())
             }
+            QueryEnum::Text(text) => QueryEnum::Text(text.clone()),
         }
     }
 }

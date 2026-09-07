@@ -4,7 +4,6 @@ use std::time::Duration;
 use common::counter::hardware_accumulator::HwMeasurementAcc;
 use segment::types::ScoredPoint;
 use shard::common::stopping_guard::StoppingGuard;
-use shard::query::query_enum::QueryEnum;
 use shard::search::CoreSearchRequestBatch;
 
 use super::LocalShard;
@@ -105,7 +104,7 @@ impl LocalShard {
         is_stopped_guard: &StoppingGuard,
     ) -> CollectionResult<Vec<Vec<ScoredPoint>>> {
         let start = std::time::Instant::now();
-        let (query_context, distances) = {
+        let (query_context, score_semantics) = {
             let collection_config = self.collection_config.read().await;
             let query_context_opt = SegmentsSearcher::prepare_query_context(
                 self.segments.clone(),
@@ -123,18 +122,19 @@ impl LocalShard {
                 return Ok(vec![]);
             };
 
-            // Resolve the per-request distances now, rather than cloning all collection params
-            let distances = core_request
+            // Resolve per-request score semantics now, rather than cloning all collection params.
+            let score_semantics = core_request
                 .searches
                 .iter()
                 .map(|req| {
-                    collection_config
-                        .params
-                        .get_distance(req.query.get_vector_name())
+                    req.query
+                        .capabilities()
+                        .score
+                        .resolve(|vector_name| collection_config.params.get_distance(vector_name))
                 })
-                .collect::<Vec<_>>();
+                .collect::<CollectionResult<Vec<_>>>()?;
 
-            (query_context, distances)
+            (query_context, score_semantics)
         };
 
         // update timeout
@@ -160,35 +160,25 @@ impl LocalShard {
         let top_results = res
             .into_iter()
             .zip(core_request.searches.iter())
-            .zip(distances)
-            .map(|((vector_res, req), distance)| {
-                let distance = distance.unwrap();
+            .zip(score_semantics)
+            .map(|((vector_res, req), score_semantics)| {
                 let processed_res = vector_res.into_iter().map(|mut scored_point| {
-                    match req.query {
-                        QueryEnum::Nearest(_) => {
-                            scored_point.score = distance.postprocess_score(scored_point.score);
-                        }
-                        // Don't post-process if we are dealing with custom scoring
-                        QueryEnum::RecommendBestScore(_)
-                        | QueryEnum::RecommendSumScores(_)
-                        | QueryEnum::Discover(_)
-                        | QueryEnum::Context(_)
-                        | QueryEnum::FeedbackNaive(_) => {}
-                    };
+                    scored_point.score = score_semantics.postprocess(scored_point.score);
                     scored_point
                 });
 
-                if let Some(threshold) = req.score_threshold {
+                let points = if let Some(threshold) = req.score_threshold {
                     processed_res
                         .take_while(|scored_point| {
-                            distance.check_threshold(scored_point.score, threshold)
+                            score_semantics.passes_threshold(scored_point.score, threshold)
                         })
                         .collect()
                 } else {
                     processed_res.collect()
-                }
+                };
+                Ok(points)
             })
-            .collect();
+            .collect::<CollectionResult<_>>()?;
         Ok(top_results)
     }
 }

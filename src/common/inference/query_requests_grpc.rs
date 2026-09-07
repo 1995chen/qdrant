@@ -296,6 +296,20 @@ fn convert_query_with_inferred(
         Variant::Rrf(rrf) => Query::Fusion(FusionInternal::try_from(rrf)?),
         Variant::Formula(formula) => Query::Formula(FormulaInternal::try_from(formula)?),
         Variant::Sample(sample) => Query::Sample(SampleInternal::try_from(sample)?),
+        Variant::Payload(payload) => {
+            let payload = rest::PayloadQuery::try_from(payload)?;
+            match payload.payload {
+                rest::PayloadQueryInterface::Text(rest::TextQuery { text }) => {
+                    Query::Payload(shard::query::payload_query::PayloadQueryInternal::Text(
+                        shard::query::payload_query::TextQueryInternal {
+                            key: text.key,
+                            query_str: text.query_str,
+                            resolved: None,
+                        },
+                    ))
+                }
+            }
+        }
         Variant::NearestWithMmr(grpc::NearestInputWithMmr { nearest, mmr }) => {
             let nearest =
                 nearest.ok_or_else(|| Status::invalid_argument("nearest vector is missing"))?;
@@ -606,5 +620,26 @@ mod tests {
                 .message()
                 .contains("positive is missing"),
         );
+    }
+
+    #[test]
+    fn test_convert_payload_text_query_keeps_payload_variant() {
+        let query = grpc::Query {
+            variant: Some(grpc::query::Variant::Payload(grpc::PayloadQuery {
+                variant: Some(grpc::payload_query::Variant::Text(grpc::TextQuery {
+                    key: "description".to_string(),
+                    query_str: "rust search".to_string(),
+                })),
+            })),
+        };
+
+        let result = convert_query_with_inferred(query, &BatchAccumInferred::new()).unwrap();
+
+        assert!(matches!(
+            result,
+            Query::Payload(shard::query::payload_query::PayloadQueryInternal::Text(
+                shard::query::payload_query::TextQueryInternal { resolved: None, .. }
+            ))
+        ));
     }
 }

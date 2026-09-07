@@ -6,9 +6,11 @@ use std::fmt;
 use bytemuck::{TransparentWrapper, TransparentWrapperAlloc as _};
 use derive_more::Into;
 use ordered_float::OrderedFloat;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use segment::data_types::vectors::{NamedQuery, VectorInternal};
 use segment::vector_storage::query::*;
+use shard::query::payload_query::{PayloadQueryInternal, TextQueryInternal};
 use shard::query::query_enum::QueryEnum;
 
 pub use self::with_payload::*;
@@ -24,7 +26,13 @@ impl FromPyObject<'_, '_> for PyQuery {
     type Error = PyErr;
 
     fn extract(query: Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
-        let query = match query.extract()? {
+        Ok(Self::from(query.extract::<PyQueryInterface>()?))
+    }
+}
+
+impl From<PyQueryInterface> for PyQuery {
+    fn from(query: PyQueryInterface) -> Self {
+        Self(match query {
             PyQueryInterface::Nearest { query, using } => QueryEnum::Nearest(NamedQuery {
                 query: VectorInternal::from(query),
                 using,
@@ -60,9 +68,7 @@ impl FromPyObject<'_, '_> for PyQuery {
                     using,
                 })
             }
-        };
-
-        Ok(Self(query))
+        })
     }
 }
 
@@ -108,6 +114,12 @@ impl<'py> IntoPyObject<'py> for PyQuery {
                     using,
                 }
             }
+
+            QueryEnum::Text(_) => {
+                return Err(PyValueError::new_err(
+                    "payload text query cannot be represented as a vector Query",
+                ));
+            }
         };
 
         Bound::new(py, query)
@@ -124,36 +136,147 @@ impl<'py> IntoPyObject<'py> for &PyQuery {
     }
 }
 
+fn fmt_query_with_using(
+    f: &mut Formatter<'_>,
+    variant: &str,
+    query: &dyn Repr,
+    using: &Option<String>,
+) -> fmt::Result {
+    f.complex_enum::<PyQueryInterface>(variant, &[("query", query), ("using", using)])
+}
+
 impl Repr for PyQuery {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let (repr, query, using): (_, &dyn Repr, _) = match &self.0 {
+        match &self.0 {
             QueryEnum::Nearest(NamedQuery { query, using }) => {
-                ("Nearest", PyNamedVectorInternal::wrap_ref(query), using)
+                fmt_query_with_using(f, "Nearest", PyNamedVectorInternal::wrap_ref(query), using)
             }
-            QueryEnum::RecommendBestScore(NamedQuery { query, using }) => (
+            QueryEnum::RecommendBestScore(NamedQuery { query, using }) => fmt_query_with_using(
+                f,
                 "RecommendBestScore",
                 PyRecommendQuery::wrap_ref(query),
                 using,
             ),
-            QueryEnum::RecommendSumScores(NamedQuery { query, using }) => (
+            QueryEnum::RecommendSumScores(NamedQuery { query, using }) => fmt_query_with_using(
+                f,
                 "RecommendSumScores",
                 PyRecommendQuery::wrap_ref(query),
                 using,
             ),
             QueryEnum::Discover(NamedQuery { query, using }) => {
-                ("Discover", PyDiscoverQuery::wrap_ref(query), using)
+                fmt_query_with_using(f, "Discover", PyDiscoverQuery::wrap_ref(query), using)
             }
             QueryEnum::Context(NamedQuery { query, using }) => {
-                ("Context", PyContextQuery::wrap_ref(query), using)
+                fmt_query_with_using(f, "Context", PyContextQuery::wrap_ref(query), using)
             }
-            QueryEnum::FeedbackNaive(NamedQuery { query, using }) => (
+            QueryEnum::FeedbackNaive(NamedQuery { query, using }) => fmt_query_with_using(
+                f,
                 "FeedbackNaive",
                 PyFeedbackNaiveQuery::wrap_ref(query),
                 using,
             ),
-        };
+            QueryEnum::Text(_) => f.unimplemented(),
+        }
+    }
+}
 
-        f.complex_enum::<PyQueryInterface>(repr, &[("query", query), ("using", using)])
+#[derive(Clone, Debug, Into, TransparentWrapper)]
+#[repr(transparent)]
+pub struct PyPayloadQuery(pub PayloadQueryInternal);
+
+impl FromPyObject<'_, '_> for PyPayloadQuery {
+    type Error = PyErr;
+
+    fn extract(query: Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
+        Self::try_from(query.extract::<PyPayloadQueryInterface>()?)
+    }
+}
+
+impl TryFrom<PyPayloadQueryInterface> for PyPayloadQuery {
+    type Error = PyErr;
+
+    fn try_from(query: PyPayloadQueryInterface) -> PyResult<Self> {
+        match query {
+            PyPayloadQueryInterface::Text { key, query_str } => {
+                if query_str.is_empty() {
+                    return Err(PyValueError::new_err("query_str can't be empty"));
+                }
+                Ok(Self(PayloadQueryInternal::Text(TextQueryInternal {
+                    key: key.0,
+                    query_str,
+                    resolved: None,
+                })))
+            }
+        }
+    }
+}
+
+impl<'py> IntoPyObject<'py> for PyPayloadQuery {
+    type Target = PyPayloadQueryInterface;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
+        let query = match self.0 {
+            PayloadQueryInternal::Text(TextQueryInternal {
+                key,
+                query_str,
+                resolved: _,
+            }) => PyPayloadQueryInterface::Text {
+                key: PyJsonPath(key),
+                query_str,
+            },
+        };
+        Bound::new(py, query)
+    }
+}
+
+impl<'py> IntoPyObject<'py> for &PyPayloadQuery {
+    type Target = PyPayloadQueryInterface;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
+        IntoPyObject::into_pyobject(self.clone(), py)
+    }
+}
+
+impl Repr for PyPayloadQuery {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            PayloadQueryInternal::Text(TextQueryInternal {
+                key,
+                query_str,
+                resolved: _,
+            }) => f.complex_enum::<PyPayloadQueryInterface>(
+                "Text",
+                &[("key", PyJsonPath::wrap_ref(key)), ("query_str", query_str)],
+            ),
+        }
+    }
+}
+
+#[pyclass(name = "PayloadQuery", from_py_object)]
+#[derive(Clone, Debug)]
+pub enum PyPayloadQueryInterface {
+    #[pyo3(constructor = (key, query_str))]
+    Text { key: PyJsonPath, query_str: String },
+}
+
+#[pymethods]
+impl PyPayloadQueryInterface {
+    pub fn __repr__(&self) -> String {
+        self.repr()
+    }
+}
+
+impl Repr for PyPayloadQueryInterface {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text { key, query_str } => {
+                f.complex_enum::<Self>("Text", &[("key", key), ("query_str", query_str)])
+            }
+        }
     }
 }
 
@@ -206,20 +329,63 @@ impl PyQueryInterface {
 
 impl Repr for PyQueryInterface {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let (repr, query, using): (_, &dyn Repr, _) = match self {
-            PyQueryInterface::Nearest { query, using } => ("Nearest", query, using),
+        match self {
+            PyQueryInterface::Nearest { query, using } => {
+                fmt_query_with_using(f, "Nearest", query, using)
+            }
             PyQueryInterface::RecommendBestScore { query, using } => {
-                ("RecommendBestScore", query, using)
+                fmt_query_with_using(f, "RecommendBestScore", query, using)
             }
             PyQueryInterface::RecommendSumScores { query, using } => {
-                ("RecommendSumScores", query, using)
+                fmt_query_with_using(f, "RecommendSumScores", query, using)
             }
-            PyQueryInterface::Discover { query, using } => ("Discover", query, using),
-            PyQueryInterface::Context { query, using } => ("Context", query, using),
-            PyQueryInterface::FeedbackNaive { query, using } => ("FeedbackNaive", query, using),
-        };
+            PyQueryInterface::Discover { query, using } => {
+                fmt_query_with_using(f, "Discover", query, using)
+            }
+            PyQueryInterface::Context { query, using } => {
+                fmt_query_with_using(f, "Context", query, using)
+            }
+            PyQueryInterface::FeedbackNaive { query, using } => {
+                fmt_query_with_using(f, "FeedbackNaive", query, using)
+            }
+        }
+    }
+}
 
-        f.complex_enum::<Self>(repr, &[("query", query), ("using", using)])
+#[cfg(test)]
+mod tests {
+    use segment::json_path::JsonPath;
+
+    use super::*;
+
+    #[test]
+    fn text_query_converts_to_unresolved_internal_query() {
+        let key: JsonPath = "description".parse().expect("valid JSON path");
+        let PyPayloadQuery(PayloadQueryInternal::Text(query)) =
+            PyPayloadQuery::try_from(PyPayloadQueryInterface::Text {
+                key: PyJsonPath(key.clone()),
+                query_str: "rust search".to_string(),
+            })
+            .expect("valid text query must convert");
+        assert_eq!(query.key, key);
+        assert_eq!(query.query_str, "rust search");
+        assert_eq!(query.resolved, None);
+    }
+
+    #[test]
+    fn text_query_rejects_empty_query_string() {
+        let key: JsonPath = "description".parse().expect("valid JSON path");
+        let error = PyPayloadQuery::try_from(PyPayloadQueryInterface::Text {
+            key: PyJsonPath(key),
+            query_str: String::new(),
+        })
+        .expect_err("empty text query must be rejected");
+
+        Python::initialize();
+        Python::attach(|py| {
+            assert!(error.is_instance_of::<PyValueError>(py));
+            assert_eq!(error.value(py).to_string(), "query_str can't be empty");
+        });
     }
 }
 

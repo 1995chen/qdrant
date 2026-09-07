@@ -354,6 +354,28 @@ message RawVector {
   }
 }
 
+message RawPayloadQuery {
+  message Text {
+    message Resolved {
+      repeated RawQueryTokenWeight token_weights = 1;
+      optional double average_document_length = 2;
+    }
+
+    string key = 1;
+    string query_str = 2;
+    Resolved resolved = 3;
+  }
+
+  oneof variant {
+    Text text = 1;
+  }
+}
+
+message RawQueryTokenWeight {
+  string token = 1;
+  float idf = 2;
+}
+
 // Query variants for raw vectors (ids have been substituted with vectors)
 message RawQuery {
   message Recommend {
@@ -429,6 +451,8 @@ message QueryShardPoints {
       MmrInternal mmr = 6;
       // Parameterized RRF fusion
       Rrf rrf = 7;
+      // Score by payload query
+      RawPayloadQuery payload = 8;
     }
   }
 

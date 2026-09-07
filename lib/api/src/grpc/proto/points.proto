@@ -500,14 +500,16 @@ message AcornSearchParams {
   optional double max_selectivity = 2;
 }
 
-// Population over which sparse vector IDF statistics are computed for scoring - the IDF corpus.
-// Only applicable to sparse vectors with the IDF modifier enabled.
+// Population over which IDF statistics are computed for scoring - the IDF corpus.
+// Applicable to sparse vectors with the IDF modifier enabled and BM25 payload text queries.
 message IdfParams {
   // Filter defining the corpus: IDF statistics are computed over the points matching this filter.
   // If unset, statistics are collection-wide (global) - same as omitting `idf` entirely.
   optional Filter corpus = 1;
 }
 
+// Additional search parameters.
+// BM25 payload text queries use only `idf`; vector-specific options have no effect.
 message SearchParams {
   // Params relevant to HNSW index. Size of the beam in a beam-search.
   // Larger the value - more accurate the result, more time required for search.
@@ -526,7 +528,7 @@ message SearchParams {
   // ACORN search params
   optional AcornSearchParams acorn = 5;
 
-  // Which population sparse vector IDF statistics are computed over.
+  // Which population IDF statistics are computed over.
   // If unset, statistics are collection-wide (global).
   optional IdfParams idf = 6;
 }
@@ -1094,7 +1096,20 @@ message Query {
     Rrf rrf = 10;
     // Search with feedback from some oracle.
     RelevanceFeedbackInput relevance_feedback = 11;
+    // Search by payload content.
+    PayloadQuery payload = 12;
   }
+}
+
+message PayloadQuery {
+  oneof variant {
+    TextQuery text = 1;
+  }
+}
+
+message TextQuery {
+  string key = 1;
+  string query_str = 2;
 }
 
 message PrefetchQuery {
@@ -1105,11 +1120,11 @@ message PrefetchQuery {
   // If missing, returns points ordered by their IDs.
   optional Query query = 2;
   // Define which vector to use for querying.
-  // If missing, the default vector is used.
+  // If missing, the default vector is used. Payload queries reject a non-default value.
   optional string using = 3;
   // Filter conditions - return only those points that satisfy the specified conditions.
   optional Filter filter = 4;
-  // Search params for when there is no prefetch.
+  // Search params for when there is no prefetch. BM25 payload text queries use only `idf`.
   optional SearchParams params = 5;
   // Return points with scores better than this threshold.
   optional float score_threshold = 6;
@@ -1117,6 +1132,7 @@ message PrefetchQuery {
   optional uint64 limit = 7;
   // The location to use for IDs lookup.
   // If not specified - use the current collection and the 'using' vector.
+  // Payload queries do not support this option.
   optional LookupLocation lookup_from = 8;
 }
 
@@ -1129,11 +1145,11 @@ message QueryPoints {
   // Query to perform. If missing, returns points ordered by their IDs.
   optional Query query = 3;
   // Define which vector to use for querying.
-  // If missing, the default vector is used.
+  // If missing, the default vector is used. Payload queries reject a non-default value.
   optional string using = 4;
   // Filter conditions - return only those points that satisfy the specified conditions.
   optional Filter filter = 5;
-  // Search params for when there is no prefetch.
+  // Search params for when there is no prefetch. BM25 payload text queries use only `idf`.
   optional SearchParams params = 6;
   // Return points with scores better than this threshold.
   optional float score_threshold = 7;
@@ -1152,6 +1168,7 @@ message QueryPoints {
   optional ShardKeySelector shard_key_selector = 13;
   // The location to use for IDs lookup.
   // If not specified - use the current collection and the 'using' vector.
+  // Payload queries do not support this option.
   optional LookupLocation lookup_from = 14;
   // If set, overrides global timeout setting for this request. Unit is seconds.
   optional uint64 timeout = 15;
@@ -1175,11 +1192,11 @@ message QueryPointGroups {
   // Query to perform. If missing, returns points ordered by their IDs.
   optional Query query = 3;
   // Define which vector to use for querying.
-  // If missing, the default vector is used.
+  // If missing, the default vector is used. Payload queries reject a non-default value.
   optional string using = 4;
   // Filter conditions - return only those points that satisfy the specified conditions.
   optional Filter filter = 5;
-  // Search params for when there is no prefetch.
+  // Search params for when there is no prefetch. BM25 payload text queries use only `idf`.
   optional SearchParams params = 6;
   // Return points with scores better than this threshold.
   optional float score_threshold = 7;
@@ -1189,6 +1206,7 @@ message QueryPointGroups {
   optional WithVectorsSelector with_vectors = 9;
   // The location to use for IDs lookup.
   // If not specified - use the current collection and the 'using' vector.
+  // Payload queries do not support this option.
   optional LookupLocation lookup_from = 10;
   // Max number of points. Default is 3.
   optional uint64 limit = 11;

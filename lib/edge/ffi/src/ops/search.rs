@@ -87,7 +87,7 @@ impl TryFrom<SearchRequest> for edge::SearchRequest {
             limit: crate::error::bounded_limit("limit", limit)?,
             offset: crate::error::bounded_limit("offset", offset.unwrap_or(0))?,
             filter: filter.map(SegmentFilter::try_from).transpose()?,
-            params: params.map(SegmentSearchParams::from),
+            params: params.map(SegmentSearchParams::try_from).transpose()?,
             with_vector: with_vector.map(SegmentWithVector::from),
             with_payload: with_payload
                 .map(WithPayloadInterface::try_from)
