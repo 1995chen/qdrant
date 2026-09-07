@@ -29,7 +29,7 @@ impl<S: UniversalRead> LiveReload for OnDiskFullTextIndex<S> {
         // patched (mirrors the other immutable leaves). `fs` / `new_points`
         // are unused because nothing is appended after build.
         for deleted_point in deleted_points {
-            self.remove_point(*deleted_point);
+            self.remove_point(*deleted_point)?;
         }
 
         Ok(())

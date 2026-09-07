@@ -55,6 +55,15 @@ pub trait FullTextIndexRead {
     }
 
     fn points_count(&self) -> usize;
+    /// Aggregate BM25 document statistics maintained by the full-text index.
+    ///
+    /// Returns `None` when BM25 frequencies are not enabled for this index.
+    fn bm25_document_stats(&self) -> Option<(usize, u64)>;
+    fn document_length(
+        &self,
+        point_id: PointOffsetType,
+        hw_counter: &HardwareCounterCell,
+    ) -> OperationResult<Option<u32>>;
     fn values_count(&self, point_id: PointOffsetType) -> usize;
     fn values_is_empty(&self, point_id: PointOffsetType) -> bool;
 
@@ -168,6 +177,17 @@ pub trait FullTextIndexRead {
             .map(|(token, cell)| (cell, token.as_ref()));
         self.for_each_token_id(iter, hw_counter, |cell, token_id| *cell = token_id)?;
         Ok(token_map)
+    }
+
+    fn tokenize_query_str(&self, text: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        self.tokenizer()
+            .tokenize(TokenizerTextKind::Query, text, |token| {
+                tokens.push(token.into_owned());
+            });
+        tokens.sort();
+        tokens.dedup();
+        tokens
     }
 
     /// Parse as [`TokenizerTextKind::Document`] and return a [`Document`].

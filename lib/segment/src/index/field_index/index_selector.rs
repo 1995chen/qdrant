@@ -517,9 +517,11 @@ impl IndexSelector<'_> {
                     deleted_points,
                 ))
             }
-            IndexSelector::Appendable { dir } => FieldIndexBuilder::FullTextGridstoreIndex(
-                FullTextIndex::builder_gridstore(text_dir(dir, field), config),
-            ),
+            IndexSelector::Appendable { dir } => {
+                FieldIndexBuilder::FullTextGridstoreIndex(Box::new(
+                    FullTextIndex::builder_gridstore(text_dir(dir, field), config),
+                ))
+            }
         }
     }
 

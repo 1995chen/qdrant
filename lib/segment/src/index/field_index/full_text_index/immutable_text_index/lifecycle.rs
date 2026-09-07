@@ -32,10 +32,14 @@ impl<S: UniversalRead> ImmutableFullTextIndex<S> {
     /// Apply the deletion to both `inverted_index` (the in-RAM cache used
     /// by queries) and `storage` (keeps the mmap's `points_count()` in
     /// sync; not persisted — id-tracker re-supplies on reload).
-    pub fn remove_point(&mut self, id: PointOffsetType) {
-        if self.inverted_index.remove(id) {
-            self.storage.remove_point(id);
+    pub fn remove_point(&mut self, id: PointOffsetType) -> OperationResult<()> {
+        if !self.inverted_index.values_is_empty(id) {
+            // The in-memory cache and its mmap-backed source maintain separate
+            // BM25 aggregates, so apply the deletion to both representations.
+            self.storage.remove_point(id)?;
+            self.inverted_index.remove(id);
         }
+        Ok(())
     }
 
     pub fn wipe(self) -> OperationResult<()> {

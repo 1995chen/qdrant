@@ -225,8 +225,8 @@ impl ValueIndexer for FullTextIndex {
     fn remove_point(&mut self, id: PointOffsetType) -> OperationResult<()> {
         match self {
             FullTextIndex::Mutable(index) => index.remove_point(id)?,
-            FullTextIndex::Immutable(index) => index.remove_point(id),
-            FullTextIndex::OnDisk(index) => index.remove_point(id),
+            FullTextIndex::Immutable(index) => index.remove_point(id)?,
+            FullTextIndex::OnDisk(index) => index.remove_point(id)?,
         }
         Ok(())
     }

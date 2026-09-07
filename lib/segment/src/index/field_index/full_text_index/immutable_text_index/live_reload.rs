@@ -26,7 +26,7 @@ impl<S: UniversalRead> LiveReload for ImmutableFullTextIndex<S> {
         _hw_counter: &HardwareCounterCell,
     ) -> OperationResult<()> {
         for deleted_point in deleted_points {
-            self.remove_point(*deleted_point);
+            self.remove_point(*deleted_point)?;
         }
 
         Ok(())

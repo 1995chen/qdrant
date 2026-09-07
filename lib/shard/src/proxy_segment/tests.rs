@@ -4,6 +4,7 @@ use common::counter::hardware_accumulator::HwMeasurementAcc;
 use common::tar_ext;
 use common::types::DeferredBehavior;
 use fs_err::File;
+use segment::data_types::index::{TextIndexBm25Config, TextIndexParams};
 use segment::data_types::named_vectors::NamedVectors;
 use segment::data_types::query_context::QueryContext;
 use segment::data_types::vectors::{DEFAULT_VECTOR_NAME, QueryVector, only_default_vector};
@@ -16,6 +17,31 @@ use tempfile::Builder;
 
 use super::*;
 use crate::fixtures::*;
+
+#[test]
+fn test_proxy_builds_bm25_index_on_wrapped_segment() {
+    let dir = Builder::new().prefix("segment_dir").tempdir().unwrap();
+    let original_segment = LockedSegment::new(build_segment_1(dir.path()));
+    let mut proxy_segment = ProxySegment::new(original_segment.clone());
+    let key = "description".parse().unwrap();
+    let schema = PayloadFieldSchema::FieldParams(PayloadSchemaParams::Text(TextIndexParams {
+        bm25_config: Some(TextIndexBm25Config {
+            enable: Some(true),
+            k1: None,
+            b: None,
+        }),
+        ..Default::default()
+    }));
+
+    proxy_segment
+        .create_field_index(13, &key, Some(&schema), &HardwareCounterCell::new())
+        .unwrap();
+
+    assert_eq!(
+        original_segment.get().read().get_indexed_fields().get(&key),
+        Some(&schema),
+    );
+}
 
 impl ProxySegment {
     /// This function is a simplified version of `search_batch` intended for testing purposes.

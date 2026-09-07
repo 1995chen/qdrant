@@ -1389,6 +1389,7 @@ class TextIndexParams:
         on_disk: Optional[bool] = None,
         stemmer: Optional["StemmingAlgorithm"] = None,
         enable_hnsw: Optional[bool] = None,
+        bm25_config: Optional["TextIndexBm25Config"] = None,
     ) -> None:
         """
         Create TextIndexParams.
@@ -1404,6 +1405,7 @@ class TextIndexParams:
             on_disk: Whether to store index on disk.
             stemmer: Stemming algorithm.
             enable_hnsw: Whether to enable HNSW index for this field.
+            bm25_config: BM25 scoring configuration for this field.
         """
         ...
 
@@ -1455,6 +1457,45 @@ class TextIndexParams:
     @property
     def enable_hnsw(self) -> Optional[bool]:
         """Whether to enable HNSW index."""
+        ...
+
+    @property
+    def bm25_config(self) -> Optional["TextIndexBm25Config"]:
+        """BM25 scoring configuration for this field."""
+        ...
+
+class TextIndexBm25Config:
+    """BM25 scoring configuration for a text payload index."""
+
+    def __init__(
+        self,
+        enable: Optional[bool] = None,
+        k1: Optional[float] = None,
+        b: Optional[float] = None,
+    ) -> None:
+        """
+        Create TextIndexBm25Config.
+
+        Args:
+            enable: Whether to enable BM25 scoring for this text index.
+            k1: Term-frequency saturation parameter.
+            b: Document-length normalization parameter.
+        """
+        ...
+
+    @property
+    def enable(self) -> Optional[bool]:
+        """Whether BM25 scoring is enabled."""
+        ...
+
+    @property
+    def k1(self) -> Optional[float]:
+        """Term-frequency saturation parameter."""
+        ...
+
+    @property
+    def b(self) -> Optional[float]:
+        """Document-length normalization parameter."""
         ...
 
 class TokenizerType(Enum):
@@ -3423,5 +3464,4 @@ class UpdateOperation:
             vector_name: Name of the vector to delete.
         """
         ...
-
 

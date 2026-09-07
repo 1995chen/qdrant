@@ -110,6 +110,7 @@ charabia = { version = "0.10.0", default-features = false, features = [
 ] }
 
 blobstore = { path = "../blobstore" }
+bm25 = { path = "../bm25" }
 
 common = { path = "../common/common" }
 macros = { path = "../macros" }

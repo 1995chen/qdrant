@@ -1,16 +1,19 @@
+use std::sync::atomic::AtomicBool;
+
 use common::counter::hardware_counter::HardwareCounterCell;
-use common::types::PointOffsetType;
+use common::types::{PointOffsetType, ScoredPointOffset};
 use common::universal_io::UserData;
 
 use super::super::full_text_index_read::{FullTextIndexRead, default_check_match_batch};
+use super::super::full_text_index_scoring::FullTextIndexScoring;
 use super::super::inverted_index::mutable_inverted_index::MutableInvertedIndex;
-use super::super::inverted_index::{InvertedIndex, ParsedQuery, TokenId};
+use super::super::inverted_index::{InvertedIndex, InvertedIndexScoring, ParsedQuery, TokenId};
 use super::super::tokenizers::Tokenizer;
 use crate::common::operation_error::OperationResult;
 use crate::data_types::index::TextIndexParams;
 use crate::index::field_index::{CardinalityEstimation, PayloadBlockCondition};
 use crate::index::payload_config::StorageType;
-use crate::types::{FieldCondition, PayloadKeyType};
+use crate::types::{FieldCondition, PayloadKeyType, QueryTokenWeightSet};
 
 /// In-memory state shared by [`MutableFullTextIndex`] and
 /// [`ReadOnlyAppendableFullTextIndex`].
@@ -40,6 +43,20 @@ impl FullTextIndexRead for MutableFullTextIndexInner {
 
     fn points_count(&self) -> usize {
         self.inverted_index.points_count()
+    }
+
+    fn bm25_document_stats(&self) -> Option<(usize, u64)> {
+        self.inverted_index
+            .bm25_stats()
+            .map(|stats| (stats.doc_count as usize, stats.sum_doc_len))
+    }
+
+    fn document_length(
+        &self,
+        point_id: PointOffsetType,
+        hw_counter: &HardwareCounterCell,
+    ) -> OperationResult<Option<u32>> {
+        self.inverted_index.document_length(point_id, hw_counter)
     }
 
     fn values_count(&self, point_id: PointOffsetType) -> usize {
@@ -112,5 +129,48 @@ impl FullTextIndexRead for MutableFullTextIndexInner {
 
     fn is_on_disk(&self) -> bool {
         false
+    }
+}
+
+impl FullTextIndexScoring for MutableFullTextIndexInner {
+    fn search_text_index<F>(
+        &self,
+        query: &QueryTokenWeightSet,
+        top: usize,
+        is_stopped: &AtomicBool,
+        filter: F,
+    ) -> OperationResult<Vec<ScoredPointOffset>>
+    where
+        F: Fn(PointOffsetType) -> bool,
+    {
+        if top == 0 {
+            return Ok(Vec::new());
+        }
+        self.inverted_index.search_text_index(
+            query,
+            super::super::bm25_params(&self.config)?,
+            top,
+            is_stopped,
+            filter,
+        )
+    }
+
+    fn search_text_index_plain(
+        &self,
+        query: &QueryTokenWeightSet,
+        top: usize,
+        ordered_prefiltered_points: &[PointOffsetType],
+        is_stopped: &AtomicBool,
+    ) -> OperationResult<Vec<ScoredPointOffset>> {
+        if top == 0 {
+            return Ok(Vec::new());
+        }
+        self.inverted_index.search_text_index_plain(
+            query,
+            super::super::bm25_params(&self.config)?,
+            top,
+            ordered_prefiltered_points,
+            is_stopped,
+        )
     }
 }

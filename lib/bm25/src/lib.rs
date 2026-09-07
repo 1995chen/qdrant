@@ -34,16 +34,30 @@ impl Bm25Params {
     /// `k1` must be finite and non-negative, `b` must be in `[0.0, 1.0]`,
     /// and `avg_doc_len` must be finite and strictly positive (it is a divisor).
     pub fn validate(&self) -> Result<(), Bm25Error> {
-        if !self.k1.is_finite() || self.k1 < 0.0 {
-            return Err(Bm25Error::InvalidK1(self.k1));
-        }
-        if !self.b.is_finite() || !(0.0..=1.0).contains(&self.b) {
-            return Err(Bm25Error::InvalidB(self.b));
-        }
+        validate_k1(self.k1)?;
+        validate_b(self.b)?;
         if !self.avg_doc_len.is_finite() || self.avg_doc_len <= 0.0 {
             return Err(Bm25Error::InvalidAvgDocLen(self.avg_doc_len));
         }
         Ok(())
+    }
+}
+
+/// Validate the BM25 term-frequency saturation parameter.
+pub fn validate_k1(k1: f64) -> Result<(), Bm25Error> {
+    if k1.is_finite() && k1 >= 0.0 {
+        Ok(())
+    } else {
+        Err(Bm25Error::InvalidK1(k1))
+    }
+}
+
+/// Validate the BM25 document-length normalization parameter.
+pub fn validate_b(b: f64) -> Result<(), Bm25Error> {
+    if b.is_finite() && (0.0..=1.0).contains(&b) {
+        Ok(())
+    } else {
+        Err(Bm25Error::InvalidB(b))
     }
 }
 
@@ -148,16 +162,43 @@ impl Bm25 {
         }
 
         let Bm25Params { k1, b, avg_doc_len } = self.params;
+        // Divide the numerator and denominator by the same scale. This keeps
+        // the standard BM25 ratio representable even when `k1` is near
+        // `f64::MAX`.
+        let scale = k1.max(1.0);
+        let scaled_k1 = k1 / scale;
+        let length_normalization = 1.0 - b + b * doc_len / avg_doc_len;
+        let scaled_length_normalization = if scaled_k1 == 0.0 {
+            0.0
+        } else {
+            scaled_k1 * length_normalization
+        };
+        let frequency_scale = (k1 + 1.0) / scale;
 
         let mut tf_map = BTreeMap::new();
         for (token, count) in &counter {
             let id = token_id(token);
             let n = f64::from(*count);
-            let mut tf = n * (k1 + 1.0);
-            tf /= k1.mul_add(1.0 - b + b * doc_len / avg_doc_len, n);
-            tf_map.insert(id, tf as f32);
+            let tf = n * frequency_scale / (n / scale + scaled_length_normalization);
+            tf_map.insert(id, finite_f32(tf));
         }
         tf_map
+    }
+}
+
+/// Convert a BM25 weight to its storage type without producing an infinity.
+///
+/// The BM25 parameters are validated before this is called, so `NaN` is only a
+/// defensive fallback for unexpected arithmetic inputs.
+fn finite_f32(value: f64) -> f32 {
+    if value.is_nan() {
+        0.0
+    } else if value >= f64::from(f32::MAX) {
+        f32::MAX
+    } else if value <= f64::from(f32::MIN) {
+        f32::MIN
+    } else {
+        value as f32
     }
 }
 
@@ -222,6 +263,21 @@ mod tests {
             .map(|(_, v)| *v)
             .expect("token 'the' should appear");
         assert!((v - 1.375).abs() < 1e-5, "got {v}");
+    }
+
+    #[test]
+    fn document_tf_stays_finite_for_maximum_k1() {
+        let bm = Bm25::new(Bm25Params {
+            k1: f64::MAX,
+            b: 0.75,
+            avg_doc_len: 2.0,
+        })
+        .unwrap();
+        let embedding = bm.embed_document(&ws("target target"));
+        let frequency_weight = embedding.values[0];
+
+        assert!(frequency_weight.is_finite());
+        assert!((frequency_weight - 2.0).abs() < 1e-6);
     }
 
     #[test]
@@ -293,5 +349,34 @@ mod tests {
                 "expected validation failure for {params:?}",
             );
         }
+    }
+
+    #[test]
+    fn individual_parameter_validation_matches_full_validation() {
+        for k1 in [-1.0, f64::NEG_INFINITY, f64::INFINITY] {
+            assert_eq!(validate_k1(k1), Err(Bm25Error::InvalidK1(k1)));
+        }
+        assert!(matches!(
+            validate_k1(f64::NAN),
+            Err(Bm25Error::InvalidK1(value)) if value.is_nan()
+        ));
+        for b in [
+            -f64::EPSILON,
+            1.0 + f64::EPSILON,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+        ] {
+            assert_eq!(validate_b(b), Err(Bm25Error::InvalidB(b)));
+        }
+        assert!(matches!(
+            validate_b(f64::NAN),
+            Err(Bm25Error::InvalidB(value)) if value.is_nan()
+        ));
+
+        assert_eq!(validate_k1(0.0), Ok(()));
+        assert_eq!(validate_k1(Bm25Params::DEFAULT_K1), Ok(()));
+        assert_eq!(validate_b(0.0), Ok(()));
+        assert_eq!(validate_b(Bm25Params::DEFAULT_B), Ok(()));
+        assert_eq!(validate_b(1.0), Ok(()));
     }
 }

@@ -29,6 +29,17 @@ use super::{ProxyDeletedPoint, ProxyIndexChange, ProxySegment};
 use crate::locked_segment::LockedSegment;
 
 impl ProxySegment {
+    fn is_bm25_schema(schema: &PayloadFieldSchema) -> bool {
+        matches!(
+            schema.expand().as_ref(),
+            PayloadSchemaParams::Text(params)
+                if params
+                    .bm25_config
+                    .as_ref()
+                    .is_some_and(|config| config.is_enabled())
+        )
+    }
+
     /// Shared preamble of `retrieve` and `retrieve_raw`: strip any vector
     /// names that the proxy intends to delete or replace with a different
     /// schema, and drop proxy-deleted points, before delegating to the
@@ -1011,6 +1022,14 @@ impl NonAppendableSegmentEntry for ProxySegment {
 
         self.version = cmp::max(self.version, op_num);
 
+        let wrapped_schema = self.wrapped_segment.get().read().get_indexed_fields();
+        if wrapped_schema.get(key).is_some_and(Self::is_bm25_schema) {
+            self.wrapped_segment
+                .get()
+                .write()
+                .delete_field_index(op_num, key)?;
+        }
+
         // Store index change to later propagate to optimized/wrapped segment
         self.changed_indexes
             .insert(key.clone(), ProxyIndexChange::Delete(op_num));
@@ -1030,6 +1049,17 @@ impl NonAppendableSegmentEntry for ProxySegment {
 
         self.version = cmp::max(self.version, op_num);
 
+        let wrapped_schema = self.wrapped_segment.get().read().get_indexed_fields();
+        if wrapped_schema
+            .get(key)
+            .is_some_and(|schema| Self::is_bm25_schema(schema) && schema != field_schema)
+        {
+            self.wrapped_segment
+                .get()
+                .write()
+                .delete_field_index_if_incompatible(op_num, key, field_schema)?;
+        }
+
         self.changed_indexes.insert(
             key.clone(),
             ProxyIndexChange::DeleteIfIncompatible(op_num, field_schema.clone()),
@@ -1041,16 +1071,24 @@ impl NonAppendableSegmentEntry for ProxySegment {
     fn build_field_index(
         &self,
         op_num: SeqNumberType,
-        _key: PayloadKeyTypeRef,
+        key: PayloadKeyTypeRef,
         field_type: &PayloadFieldSchema,
-        _hw_counter: &HardwareCounterCell,
+        hw_counter: &HardwareCounterCell,
     ) -> OperationResult<BuildFieldIndexResult> {
         if self.version() > op_num {
             return Ok(BuildFieldIndexResult::SkippedByVersion);
         }
 
+        if Self::is_bm25_schema(field_type) {
+            return self
+                .wrapped_segment
+                .get()
+                .read()
+                .build_field_index(op_num, key, field_type, hw_counter);
+        }
+
         Ok(BuildFieldIndexResult::Built {
-            indexes: vec![], // No actual index is built in proxy segment, they will be created later
+            indexes: vec![],
             schema: field_type.clone(),
         })
     }
@@ -1060,13 +1098,22 @@ impl NonAppendableSegmentEntry for ProxySegment {
         op_num: SeqNumberType,
         key: PayloadKeyType,
         field_schema: PayloadFieldSchema,
-        _field_index: Vec<FieldIndex>,
+        field_index: Vec<FieldIndex>,
     ) -> OperationResult<bool> {
         if self.version() > op_num {
             return Ok(false);
         }
 
         self.version = cmp::max(self.version, op_num);
+
+        if Self::is_bm25_schema(&field_schema) {
+            self.wrapped_segment.get().write().apply_field_index(
+                op_num,
+                key.clone(),
+                field_schema.clone(),
+                field_index,
+            )?;
+        }
 
         // Store index change to later propagate to optimized/wrapped segment
         self.changed_indexes
